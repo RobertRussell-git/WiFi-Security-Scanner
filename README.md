@@ -1,4 +1,4 @@
-# Heltec WiFi Security Scanner
+# WiFi Security Scanner
 ![Difficulty](https://img.shields.io/badge/Difficulty-Beginner%20Friendly-green)
 ![Soldering](https://img.shields.io/badge/Soldering-Optional-yellow)
 ![Platform](https://img.shields.io/badge/Platform-ESP32--S3-blue)
