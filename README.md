@@ -1,158 +1,168 @@
-<img width="1892" height="1053" alt="palaOne" src="https://github.com/user-attachments/assets/0fdef5ba-eabd-4b71-9a0c-4c1dc78a4bee" />
+# Heltec WiFi Security Scanner
+![Difficulty](https://img.shields.io/badge/Difficulty-Beginner%20Friendly-green)
+![Soldering](https://img.shields.io/badge/Soldering-Optional-yellow)
+![Platform](https://img.shields.io/badge/Platform-ESP32--S3-blue)
 
-# pala-one-firmware
-Pala One — A tiny E-Ink reader project by Paul Lagier
+A portable WiFi security auditing tool built on the Heltec Wireless Paper V1.2 (ESP32-S3).
+Scans nearby networks and classifies them by security risk, with a full web report served over its own access point.
 
-The goal of the project was to create a simple, distraction-free reading device that feels minimal, portable and easy to build while still looking and behaving more like a real product than a typical DIY electronics project.
-
-## Contributing
-
-If you improve the firmware, add features or fix bugs, feel free to open a pull request.
-Please clearly mention:
-- which board version(s) you tested on (V1.1, V1.2, or both)
-- what was changed
-- how it was tested
-
-## Board Versions
-
-There are currently two supported Heltec Wireless Paper versions:
-- `Heltec V1.1`
-- `Heltec V1.2`
-
-The board version is usually printed on the back of the PCB.
-
-Both versions are built from the same source file (`Pala_One_2_1/Pala_One_2_1.ino`). Open it in Arduino IDE and uncomment the `#define` at the top that matches your hardware before compiling.
-
-## Apps
-
-Apps are compiled separately and uploaded to the device via the WiFi web interface — no firmware rebuild needed. The Apps menu discovers all `.bin` files in `/apps/` on the device and lists them by name.
-
-### Building an app
-
-You need:
-- The `xtensa-esp32s3-elf-gcc` cross-compiler, which ships with the Arduino ESP32 board package. On Linux it is found under `~/.arduino15/packages/esp32/tools/esp-x32/<version>/bin/`; the `Makefile` locates it automatically.
-- `python3` (for the post-build step that patches the entry point offset into the binary).
-
-An app is a single C file that includes `pala_app.h` and `pala_api.h` from the firmware source and exports a `void app_main(const PalaAPI* api)` entry point. The header struct at the start of the binary carries the display name and API version check.
-
-See `examples/click_counter/` for a complete working example with a `Makefile`.
-
-```bash
-cd examples/click_counter
-make
-# produces click_counter.bin
-```
-
-### Uploading an app
-
-1. Select **Upload** from the library menu on the device.
-2. Connect to the `PALA-XXXXXX` WiFi network (password: `palaread`).
-3. Open `http://192.168.4.1` in a browser.
-4. Use the **Upload app (.bin)** card to upload your `.bin` file.
-5. Triple-click to exit upload mode — the app will appear in the Apps menu immediately.
-
-### App API
-
-Apps communicate with the firmware through the `PalaAPI` function pointer table passed to `app_main`. The current API version is **v3** (`PALA_API_VERSION 3` in `pala_app.h`).
-
-#### Display
-
-| Function | Description |
-|---|---|
-| `clearScreen()` | Clear the display buffer and prepare a new frame |
-| `drawHeader(title)` | Draw the standard section header bar |
-| `drawTextAt(x, y, text, bold)` | Draw text at a pixel position |
-| `drawCenteredLarge(text)` | Draw text centred on screen in a large font |
-| `refreshDisplay()` | Push the frame buffer to the e-ink panel |
-
-#### Input
-
-| Function | Description |
-|---|---|
-| `waitForEvent()` | Block until a button gesture; returns `PALA_CLICK` / `PALA_DOUBLE` / `PALA_TRIPLE` / `PALA_LONG` |
-| `pollEvent()` | Non-blocking variant; returns 0 if no event is ready |
-| `buttonPressed()` | Returns 1 if the button is currently held, 0 otherwise |
-| `pendingPresses()` | Count of individual short press-release events since last call; bypasses multi-click grouping |
-
-#### Timing
-
-| Function | Description |
-|---|---|
-| `millisNow()` | Current uptime in milliseconds |
-| `delayMs(ms)` | Yield for `ms` milliseconds |
-| `rtcSeconds()` | Monotonic seconds counter that survives deep sleep; use for cross-session timing |
-
-#### Storage
-
-| Function | Description |
-|---|---|
-| `storageRead(key, buf, maxlen)` | Read from `/apps/{key}.dat`; returns bytes read, -1 on error |
-| `storageWrite(key, buf, len)` | Write to `/apps/{key}.dat`; returns bytes written, -1 on error |
-
-#### Utilities
-
-| Function | Description |
-|---|---|
-| `snprintf_wrap(buf, len, fmt, ...)` | Standard `snprintf` |
-
-Return from `app_main` to exit back to the Apps menu. Apps decide their own exit gesture — the firmware does not impose one.
-
-**Constraints:**
-- Apps must be compiled `-fPIC -mlongcalls` (position-independent).
-- Apps must not use static mutable variables — the loader does not patch `.data` relocations.
-- Maximum binary size: 48 KB.
-- The `api_version` field in `PalaAppHeader` must match `PALA_API_VERSION` exactly — the firmware rejects mismatched binaries.
-
-## Features
-
-- TXT book support
-- Adjustable font size
-- Adjustable line spacing
-- Deep sleep mode
-- Reading progress saving
-- USB-C charging
-- Lightweight portable design
-- Open-source firmware
-
-## Hardware
-
-Pala One is based on:
-- Heltec Wireless Paper
-- 3D printed housing
-- LiPo battery
-
-## Downloads
-
-This repository contains the firmware source code for the project.
-
-Additional files such as:
-- STL files
-- STEP files
-- assembly guides
-- printable files
-- project downloads
-
-are available separately via Ko-fi:
-
-https://ko-fi.com/s/e14ed892ea
-
-## Community & Modifications
-
-Community improvements, forks and firmware modifications are welcome.  
-If you build your own version or improve the project, feel free to share it with the community.
-
-## License & Copyright
-
-The firmware in this repository is provided for personal and educational use.
-
-Please do not:
-- reupload paid project files
-- redistribute complete download packages
-- resell the project files
-- commercially redistribute modified versions of paid assets
-
-The design, branding, documentation and paid project assets remain copyright © Paul Lagier.
+<img src="Images/1.jpg" width="400"> <img src="Images/2.jpg" width="400">
+<img src="Images/3.jpg" width="400"> <img src="Images/4.jpg" width="400">
 
 ---
 
-Created by Paul Lagier
+## Features
+
+- Passive WiFi scanning - no connection to any network
+- Risk classification: LOW / MEDIUM / HIGH / CRITICAL
+- Displays ESSID, BSSID, PWR, CH, MB, ENC, CIPHER, AUTH
+- Scrollable summary list with cursor navigation
+- Detail view per network
+- Historical database - accumulates up to 200 unique BSSIDs across scans
+- Background auto-scan every 20 seconds
+- Web report at http://192.168.4.1 (airodump-ng style table)
+- Deep sleep with wake-on-button
+- Battery level indicator
+
+---
+
+## Hardware
+
+| Component | Details |
+|---|---|
+| Board | Heltec Wireless Paper V1.2 |
+| Chip | ESP32-S3FN8 + SX1262 |
+| Display | 250×122 e-ink |
+| Button | GPIO0 (onboard) |
+| Battery | Single cell LiPo 3.7V |
+
+### Where to buy *(links verified May 2026)*
+
+- **Board** - [Heltec Wireless Paper V1.2 on AliExpress](https://www.aliexpress.com/item/1005005698328124.html)
+- **Battery (requires soldering, higher capacity)** - [LiPo battery on AliExpress](https://www.aliexpress.com/item/32956044089.html)
+- **Battery (no soldering, lower capacity)** - [LiPo battery on eBay](https://www.ebay.com/itm/253599191104)
+
+> Note: The board listing title may say 212×104 pixels - this is the same board.
+> Make sure you select **V1.2** and not V1.1.
+
+---
+
+## Dependencies
+
+Install via Arduino Library Manager:
+
+| Library | Purpose |
+|---|---|
+| `heltec-eink-modules` | E-ink display driver |
+| `Adafruit GFX Library` | Graphics primitives |
+| `U8g2_for_Adafruit_GFX` | Font rendering |
+
+Built-in ESP32 libraries: `WiFi`, `WebServer`, `esp_wifi`, `esp_bt`, `esp_sleep`, `esp_timer`
+
+---
+
+## Arduino IDE Setup
+
+1. Go to **File → Preferences → Additional Boards Manager URLs** and add: https://github.com/Heltec-Aaron-Lee/WiFi_Kit_series/releases/download/0.0.5/package_heltec_esp32_index.json
+2. Go to **Tools → Board → Boards Manager**, search for **Heltec ESP32 Series Arduino Develop Environment** and install
+3. Select board: **Heltec Wireless Paper V1.2**
+4. Select port: **Tools → Port → COM3** (Windows) or **/dev/ttyUSB0** (Linux/Mac)
+5. Install the three libraries listed above
+6. Open `HeltecWifiScanner.ino` and upload
+
+---
+
+## Button Controls
+
+| Screen | 1x click | 2x click | 3x click | Hold |
+|---|---|---|---|---|
+| Menu | Next item | Select | — | Sleep |
+| Results | Cursor ↓ | Next page | Detail view | Menu |
+| Detail | Back | — | — | Menu |
+| Web report | — | — | — | Stop & menu |
+
+---
+
+## Web Report
+
+When **Web Report** is selected from the menu:
+
+1. The device creates a WiFi access point
+2. Connect your phone or laptop:
+   - SSID: `WiFi-Security-Scanner`
+   - Password: `SetYourOwnPassword`
+3. Open a browser and go to `http://192.168.4.1`
+4. The full scan history is shown in an airodump-ng style table
+
+> **Note:** Change `AP_SSID` and `AP_PASS` at the top of `HeltecWifiScanner.ino`
+> before uploading to set your own network name and password.
+
+![Web report](Images/web-report.jpg)
+
+---
+
+## Risk Classification
+
+| Risk | Label | Encryption |
+|---|---|---|
+| 0 | LOW | WPA3, WPA2+WPA3 |
+| 1 | MEDIUM | WPA2 |
+| 2 | HIGH | WPA1 |
+| 3 | CRITICAL | OPEN, WEP |
+
+---
+
+## Legal
+
+This tool performs **passive scanning only**. It reads beacon frames that access
+points broadcast publicly. The same information your phone sees when searching
+for WiFi networks. It does not connect to, inject packets into or capture data
+from any network.
+
+Use only on networks you own or have explicit written permission to audit.
+
+---
+
+## Acknowledgements
+
+Button handling, battery measurement, and deep sleep patterns were adapted from
+the [Pala One firmware](https://github.com/PaulLagier/pala-one-firmware)
+by [Paul Lagier](https://github.com/PaulLagier).
+
+His work on the Heltec Wireless Paper platform made this project significantly
+easier to build. Check out his e-reader project, it is excellent!
+
+This project was developed using the same hardware platform as the Pala One firmware
+and is intended as a separate, standalone application for network security auditing.
+
+---
+
+## Case
+
+The 3D printed case shown in the photos is from the Pala One project by Paul Lagier.
+It fits the Heltec Wireless Paper V1.2 perfectly and is available for purchase here:
+
+https://ko-fi.com/s/e14ed892ea
+
+> Please check the specific specifications for the battery size and the printable
+> case files to ensure compatibility before purchasing the hardware.
+> Paul has a print for every battery mentioned in this project. It only depends
+> on the style of the case, size, soldering or capacity.
+---
+
+## Author
+
+Robert Russell
+
+---
+
+## License
+
+This project is provided for personal and educational use.
+
+Please do not:
+- Redistribute complete project packages
+- Resell or commercially redistribute this project
+- Use this project for commercial purposes without permission
+
+Copyright © Robert Russell
