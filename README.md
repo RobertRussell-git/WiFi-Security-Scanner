@@ -158,11 +158,4 @@ Robert Russell
 
 ## License
 
-This project is provided for personal and educational use.
-
-Please do not:
-- Redistribute complete project packages
-- Resell or commercially redistribute this project
-- Use this project for commercial purposes without permission
-
-Copyright © Robert Russell
+See [LICENSE](LICENSE) for details.
