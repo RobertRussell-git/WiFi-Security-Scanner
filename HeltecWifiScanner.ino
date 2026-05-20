@@ -68,8 +68,8 @@ const uint8_t* BOLD_FONT = u8g2_font_helvB08_te;
 // ============================================================================
 //  Access point credentials for web report mode
 // ============================================================================
-static const char* AP_SSID = "WiFi-Security-Scanner";
-static const char* AP_PASS = "SetYourOwnPassword";
+static const char* AP_SSID = "WiFi-Security-Scanner"; // could change this to stay stealthy
+static const char* AP_PASS = "SetYourOwnPassword"; // change your password
 
 // ============================================================================
 //  Display adapter
@@ -242,7 +242,7 @@ static bool g_pauseAutoScan  = false;
 //
 //  Reads ADC through a voltage divider gated by BAT_ADC_CTRL.
 //  Uses a 21-sample median filter to reject ADC noise.
-//  Maps 3.0V → 0%, 4.2V → 100%.
+//  Maps 3.0V -> 0%, 4.2V -> 100%.
 // ============================================================================
 #if HAS_BATTERY
 static int cmpUint16(const void* a, const void* b) {
@@ -318,7 +318,7 @@ static int        g_cursorIndex     = 0;
 static bool       g_hasScanned      = false;
 static int        g_prevCursorIndex = -1; // for partial cursor refresh
 
-// Historical database — persists across scans, keyed by BSSID
+// Historical database - persists across scans, keyed by BSSID
 // Stores strongest RSSI seen per unique access point
 static ScanResult g_seen[200];
 static int        g_seenCount   = 0;
@@ -473,7 +473,7 @@ static void endFrame() {
 }
 
 // ============================================================================
-//  Shared header and footer — drawn on every screen
+//  Shared header and footer - drawn on every screen
 // ============================================================================
 static void drawHeader(const char* title) {
 #if HAS_BATTERY
@@ -540,7 +540,7 @@ static void updateMenuCursor() {
 }
 
 // ============================================================================
-//  Scan results — summary list
+//  Scan results - summary list
 // ============================================================================
 static void drawSummaryRow(int row, int idx) {
   const ScanResult& r = g_results[idx];
@@ -878,8 +878,8 @@ static void stopWebReport() {
 //  Results sorted by risk descending, then RSSI descending.
 //  Each result merged into the persistent g_seen[] historical database.
 //
-//  showUi=true  → manual scan, shows scanning screen first
-//  showUi=false → background scan, silent
+//  showUi=true  -> manual scan, shows scanning screen first
+//  showUi=false -> background scan, silent
 //
 //  MB estimation note:
 //    WPA2/WPA3 networks are flagged as 130n (likely 802.11n).
