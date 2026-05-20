@@ -125,15 +125,9 @@ Use only on networks you own or have explicit written permission to audit.
 
 ## Acknowledgements
 
-Button handling, battery measurement, and deep sleep patterns were adapted from
-the [Pala One firmware](https://github.com/PaulLagier/pala-one-firmware)
-by [Paul Lagier](https://github.com/PaulLagier).
-
-His work on the Heltec Wireless Paper platform made this project significantly
-easier to build. Check out his e-reader project, it is excellent!
-
-This project was developed using the same hardware platform as the Pala One firmware
-and is intended as a separate, standalone application for network security auditing.
+Adapted from the [Pala One firmware](https://github.com/PaulLagier/pala-one-firmware)
+by [Paul Lagier](https://github.com/PaulLagier) — button handling, battery measurement,
+and deep sleep patterns. Check out his e-reader project, it is excellent!
 
 ---
 
