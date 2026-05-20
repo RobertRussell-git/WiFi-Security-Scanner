@@ -1,0 +1,14 @@
+Copyright © Robert Russell 2026
+
+This project is provided for personal and educational use.
+
+Portions of the input handling, battery measurement and deep sleep code
+are adapted from the Pala One firmware by Paul Lagier
+(https://github.com/PaulLagier/pala-one-firmware), used with credit.
+
+Please do not:
+- Redistribute complete project packages
+- Resell or commercially redistribute this project
+- Use this project for commercial purposes without permission
+
+The scanner firmware, design, and documentation remain copyright © Robert Russell.
