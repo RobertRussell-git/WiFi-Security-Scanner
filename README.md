@@ -63,7 +63,7 @@ The scanner passively monitors for suspicious network behaviour across scans:
 | Duplicate SSID | i | Multiple networks sharing the same name |
 | Duplicate infrastructure | i | Multiple BSSIDs for the same ESSID (normal for mesh/extenders) |
 
-> **Note:** Anomaly detection may elevate network severity regardless of encryption type.
+**Note:** Anomaly detection may elevate network severity regardless of encryption type.
 
 <img src="Images/web-report-with-anomalies.png" width="600">
 
