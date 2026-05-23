@@ -49,7 +49,7 @@ When **Web Report** is selected from the menu:
 > before uploading to set your own network name and password.
 
 <img src="Images/web-report.png" width="600">
-**Note:** Screenshot captured from a mobile phone browser.
+> **Note:** Screenshot captured from a mobile phone browser.
 
 ### Anomaly Detection
 
@@ -62,8 +62,6 @@ The scanner passively monitors for suspicious network behaviour across scans:
 | Channel shift | ! | Network moved channels between scans |
 | Duplicate SSID | i | Multiple networks sharing the same name |
 | Duplicate infrastructure | i | Multiple BSSIDs for the same ESSID (normal for mesh/extenders) |
-
-**Note:** Anomaly detection may elevate network severity regardless of encryption type.
 
 <img src="Images/web-report-with-anomalies.png" width="600">
 
