@@ -45,10 +45,11 @@ When **Web Report** is selected from the menu:
 5. If anomalies are detected, a dedicated **Anomalies Detected** section appears below the table
 6. A CSV export link at the bottom lets you download the full scan history
 
-<img src="Images/web-report.png" width="600">
-
 > **Note:** Change `AP_SSID` and `AP_PASS` at the top of `HeltecWifiScanner.ino`
 > before uploading to set your own network name and password.
+
+<img src="Images/web-report.png" width="600">
+> **Note:** Screenshot captured from a mobile phone browser.
 
 ### Anomaly Detection
 
