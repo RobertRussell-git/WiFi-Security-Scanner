@@ -62,7 +62,7 @@ The scanner passively monitors for suspicious network behaviour across scans:
 | Duplicate SSID | i | Multiple networks sharing the same name |
 | Duplicate infrastructure | i | Multiple BSSIDs for the same ESSID (normal for mesh/extenders) |
 
-<img src="Images/web-report-anomalies" width="600">
+<img src="Images/web-report-anomalies.png" width="600">
 
 ---
 
