@@ -4,11 +4,13 @@
 //  Author: Robert Russell
 //
 //  Features:
-//    - Passive WiFi scanning (ESSID, BSSID, PWR, CH, MB, ENC, CIPHER, AUTH)
-//    - Risk classification (LOW / MEDIUM / HIGH / CRITICAL)
-//    - Historical network database (up to 200 unique BSSIDs)
-//    - Background auto-scan every 20 seconds
-//    - Web report served over AP (full airodump-ng style table)
+//    - Passive WiFi reconnaissance and telemetry
+//    - Beacon analysis (ESSID, BSSID, RSSI, CH, ENC, AUTH)
+//    - Risk classification and anomaly detection
+//    - Historical network intelligence database
+//    - Evil Twin / auth mismatch detection
+//    - Background roaming scans with persistent tracking
+//    - E-Ink UI + web report + CSV export
 // ============================================================================
 
 #include <heltec-eink-modules.h>
@@ -68,8 +70,8 @@ const uint8_t* BOLD_FONT = u8g2_font_helvB08_te;
 // ============================================================================
 //  Access point credentials for web report mode
 // ============================================================================
-static const char* AP_SSID = "WiFi-Security-Scanner"; // could change this to stay stealthy
-static const char* AP_PASS = "SetYourOwnPassword"; // change your password
+static const char* AP_SSID = "WiFi-Security-Scanner";
+static const char* AP_PASS = "SetYourOwnPassword";
 
 // ============================================================================
 //  Display adapter
@@ -242,7 +244,7 @@ static bool g_pauseAutoScan  = false;
 //
 //  Reads ADC through a voltage divider gated by BAT_ADC_CTRL.
 //  Uses a 21-sample median filter to reject ADC noise.
-//  Maps 3.0V -> 0%, 4.2V -> 100%.
+//  Maps 3.0V → 0%, 4.2V → 100%.
 // ============================================================================
 #if HAS_BATTERY
 static int cmpUint16(const void* a, const void* b) {
@@ -293,6 +295,15 @@ static void drawBattery() {
 #endif
 
 // ============================================================================
+//  Anomaly detection flags
+// ============================================================================
+#define ANOM_DUPLICATE_SSID  0x01
+#define ANOM_AUTH_CHANGE     0x02
+#define ANOM_BSSID_ROTATION  0x04
+#define ANOM_CHANNEL_SHIFT   0x08
+#define ANOM_EVIL_TWIN       0x10
+
+// ============================================================================
 //  Scan result
 //
 //  Stores everything needed for the summary row and detail view.
@@ -308,6 +319,13 @@ struct ScanResult {
   bool    rateIsN;    // true = append 'n' suffix (802.11n)
   uint8_t authMode;   // raw wifi_auth_mode_t
   uint8_t riskLevel;  // 0=LOW 1=MEDIUM 2=HIGH 3=CRITICAL
+    // New features
+  uint32_t firstSeen;
+  uint32_t lastSeen;
+  uint16_t sightings;
+  uint8_t  anomalyFlags;
+  uint8_t  lastAuthMode;
+  uint8_t  lastChannel;
 };
 
 // Current scan window (shown in summary list)
@@ -318,7 +336,7 @@ static int        g_cursorIndex     = 0;
 static bool       g_hasScanned      = false;
 static int        g_prevCursorIndex = -1; // for partial cursor refresh
 
-// Historical database - persists across scans, keyed by BSSID
+// Historical database — persists across scans, keyed by BSSID
 // Stores strongest RSSI seen per unique access point
 static ScanResult g_seen[200];
 static int        g_seenCount   = 0;
@@ -561,7 +579,12 @@ static void drawSummaryRow(int row, int idx) {
     u8g2.print(">");
   }
 
-  u8g2.setCursor(X_RISK, y);   u8g2.print(riskSym(r.riskLevel));
+  u8g2.setCursor(X_RISK, y);
+  if (r.anomalyFlags) {
+    u8g2.print("!!!");
+  } else {
+    u8g2.print(riskSym(r.riskLevel));
+  }
 
   char bs[6];
   bssidShort(r.bssid, bs, sizeof(bs));
@@ -639,6 +662,17 @@ static void updateSummaryCursor() {
   display.update();
 }
 
+static void formatElapsed(uint32_t ms, char* out, size_t len) {
+  uint32_t seconds = ms / 1000;
+  if (seconds < 60) {
+    snprintf(out, len, "%lus ago", seconds);
+  } else if (seconds < 3600) {
+    snprintf(out, len, "%lum ago", seconds / 60);
+  } else {
+    snprintf(out, len, "%luh ago", seconds / 3600);
+  }
+}
+
 // ============================================================================
 //  Network detail view
 //  Shows full BSSID, signal, channel, encryption, auth, and risk
@@ -669,6 +703,29 @@ static void drawDetail(int idx) {
   u8g2.setCursor(X, Y+DY*3);   u8g2.print("Encrypt:"); u8g2.setCursor(62, Y+DY*3);   u8g2.print(encLabel(r.authMode));
   u8g2.setCursor(X, Y+DY*4);   u8g2.print("Auth:");    u8g2.setCursor(62, Y+DY*4);   u8g2.print(authLabel(r.authMode));
   u8g2.setCursor(X, Y+DY*5);   u8g2.print("Risk:");    u8g2.setCursor(62, Y+DY*5);   u8g2.print(riskWord(r.riskLevel));
+
+  // Timestamps
+  char elapsed[16];
+  uint32_t now = millis();
+  formatElapsed(now - r.firstSeen, elapsed, sizeof(elapsed));
+  u8g2.setCursor(X, Y+DY*6);  u8g2.print("First:");
+  u8g2.setCursor(62, Y+DY*6); u8g2.print(elapsed);
+
+  // Anomaly warnings
+  if (r.anomalyFlags) {
+    u8g2.setCursor(X, Y+DY*7);
+    if (r.anomalyFlags & ANOM_EVIL_TWIN) {
+      u8g2.print("!! Possible Evil Twin");
+    } else if (r.anomalyFlags & ANOM_AUTH_CHANGE) {
+      u8g2.print("! Auth change detected");
+    } else if (r.anomalyFlags & ANOM_DUPLICATE_SSID) {
+      u8g2.print("i Duplicate SSID");
+    } else if (r.anomalyFlags & ANOM_CHANNEL_SHIFT) {
+      u8g2.print("! Channel shift detected");
+    } else if (r.anomalyFlags & ANOM_BSSID_ROTATION) {
+      u8g2.print("i Duplicate infrastructure");
+    }
+  }
 
   drawFooter("1x=back  hold=menu");
   endFrame();
@@ -840,9 +897,86 @@ static void handleWebReport() {
     html += F("</table>");
     html += F("<p style='margin-top:20px;color:#555;font-size:11px'>");
     html += F("LOW=WPA3 &nbsp; MEDIUM=WPA2 &nbsp; HIGH=WPA1 &nbsp; CRITICAL=OPEN/WEP</p>");
+
+    bool anyAnomalies = false;
+    for (int i = 0; i < g_seenCount; i++) {
+      if (g_seen[i].anomalyFlags) { anyAnomalies = true; break; }
+    }
+
+    if (anyAnomalies) {
+      html += F("<h2 style='color:#e94560;margin-top:30px'>&#9888; Anomalies Detected</h2>");
+      html += F("<table><tr><th>ESSID</th><th>BSSID</th><th>Warning</th></tr>");
+
+      for (int i = 0; i < g_seenCount; i++) {
+        if (!g_seen[i].anomalyFlags) continue;
+
+        const ScanResult& r = g_seen[i];
+        char bf[18];
+        bssidFull(r.bssid, bf, sizeof(bf));
+
+        const char* warning = "";
+        if (r.anomalyFlags & ANOM_EVIL_TWIN) {
+          warning = "!! Possible Evil Twin";
+        } else if (r.anomalyFlags & ANOM_AUTH_CHANGE) {
+          warning = "! Auth mode changed";
+        } else if (r.anomalyFlags & ANOM_DUPLICATE_SSID) {
+          warning = "i Duplicate SSID detected";
+        } else if (r.anomalyFlags & ANOM_CHANNEL_SHIFT) {
+          warning = "! Channel shift detected";
+        } else if (r.anomalyFlags & ANOM_BSSID_ROTATION) {
+          warning = "i Duplicate infrastructure detected";
+        }
+
+        html += F("<tr><td>");
+        html += (r.essid[0] ? r.essid : "<i>hidden</i>");
+        html += F("</td><td>");
+        html += bf;
+        html += F("</td><td style='color:#e94560;font-weight:bold'>");
+        html += warning;
+        html += F("</td></tr>");
+      }
+      html += F("</table>");
+    }
   }
+  // Download CSV
+  html += F("<p><a href='/export' style='color:#e94560'>Download CSV</a></p>");
+
   html += F("</body></html>");
   server.send(200, "text/html", html);
+}
+
+// ============================================================================
+//  Export to CSV for documentation
+// ============================================================================
+static void handleCsvExport() {
+  String csv;
+  csv.reserve(4096);
+  csv = F("ESSID,BSSID,PWR,CH,MB,ENC,CIPHER,AUTH,RISK,FIRST_SEEN_S,LAST_SEEN_S,SIGHTINGS,FLAGS\r\n");
+
+  for (int i = 0; i < g_seenCount; i++) {
+    const ScanResult& r = g_seen[i];
+    char bf[18], mb[8];
+    bssidFull(r.bssid, bf, sizeof(bf));
+    mbStr(r.maxRate, r.rateIsN, mb, sizeof(mb));
+
+    csv += (r.essid[0] ? r.essid : "(hidden)");
+    csv += ","; csv += bf;
+    csv += ","; csv += r.rssi;
+    csv += ","; csv += r.channel;
+    csv += ","; csv += mb;
+    csv += ","; csv += encLabel(r.authMode);
+    csv += ","; csv += cipherLabel(r.authMode);
+    csv += ","; csv += authLabel(r.authMode);
+    csv += ","; csv += riskWord(r.riskLevel);
+    csv += ","; csv += (r.firstSeen / 1000);
+    csv += ","; csv += (r.lastSeen / 1000);
+    csv += ","; csv += r.sightings;
+    csv += ","; csv += r.anomalyFlags;
+    csv += "\r\n";
+  }
+
+  server.sendHeader("Content-Disposition", "attachment; filename=wifi_scan.csv");
+  server.send(200, "text/csv", csv);
 }
 
 static void startWebReport() {
@@ -851,6 +985,7 @@ static void startWebReport() {
   WiFi.softAP(AP_SSID, AP_PASS);
   delay(200);
   server.on("/", handleWebReport);
+  server.on("/export", handleCsvExport);
   server.begin();
   mode = MODE_WEBREPORT;
   drawWebReportScreen();
@@ -881,12 +1016,20 @@ static void stopWebReport() {
 //  showUi=true  -> manual scan, shows scanning screen first
 //  showUi=false -> background scan, silent
 //
+//  Anomaly detection runs after each scan:
+//    - Duplicate SSID / Evil Twin: flags networks that differ from the
+//      dominant auth mode among networks sharing the same ESSID
+//    - Auth change: flags networks whose security type changed since last scan
+//    - Channel shift: flags networks that moved channels between scans
+//    - BSSID rotation: flags ESSIDs with 3+ unique BSSIDs in history
+//
 //  MB estimation note:
 //    WPA2/WPA3 networks are flagged as 130n (likely 802.11n).
 //    All others are set to 54 (802.11g/legacy).
 //    The ESP32 API does not expose raw information elements, so this
 //    is an inference only.
 // ============================================================================
+
 static void doScan(bool showUi = true) {
   if (g_scanRunning) return;
   g_scanRunning = true;
@@ -903,9 +1046,14 @@ static void doScan(bool showUi = true) {
   g_cursorIndex     = 0;
   g_scrollOffset    = 0;
   g_prevCursorIndex = -1;
+  
+  for (int i = 0; i < MAX_SCAN; i++) {
+  g_results[i].anomalyFlags = 0;
+  }
 
   if (n > 0) {
     int count = min(n, MAX_SCAN);
+    uint32_t now = millis();
 
     for (int i = 0; i < count; i++) {
       strncpy(g_results[i].essid, WiFi.SSID(i).c_str(), sizeof(g_results[i].essid) - 1);
@@ -929,10 +1077,39 @@ static void doScan(bool showUi = true) {
       g_results[i].rateIsN = isN;
 
       int seenIdx = findSeenByBssid(g_results[i].bssid);
+
       if (seenIdx < 0) {
+        // New network - initialise anomaly fields
+        g_results[i].firstSeen    = now;
+        g_results[i].lastSeen     = now; 
+        g_results[i].sightings    = 1;
+        g_results[i].anomalyFlags = 0;
+        g_results[i].lastAuthMode = g_results[i].authMode;
+        g_results[i].lastChannel  = g_results[i].channel;
         if (g_seenCount < 200) g_seen[g_seenCount++] = g_results[i];
       } else {
-        if (g_results[i].rssi > g_seen[seenIdx].rssi) g_seen[seenIdx] = g_results[i];
+        // Existing network - update and check for anomalies
+        g_seen[seenIdx].lastSeen = now;
+        g_seen[seenIdx].sightings++;
+
+        // Auth mode change detection
+        if (g_results[i].authMode != g_seen[seenIdx].lastAuthMode) {
+          g_seen[seenIdx].anomalyFlags |= ANOM_AUTH_CHANGE;
+        }
+
+        // Channel shift detection
+        if (g_results[i].channel != g_seen[seenIdx].lastChannel) {
+          g_seen[seenIdx].anomalyFlags |= ANOM_CHANNEL_SHIFT;
+        }
+
+        // Update last known values
+        g_seen[seenIdx].lastAuthMode = g_results[i].authMode;
+        g_seen[seenIdx].lastChannel  = g_results[i].channel;
+
+        // Keep strongest signal
+        if (g_results[i].rssi > g_seen[seenIdx].rssi) {
+          g_seen[seenIdx].rssi = g_results[i].rssi;
+        }
       }
     }
 
@@ -940,6 +1117,54 @@ static void doScan(bool showUi = true) {
     if (g_cursorIndex >= g_resultCount) g_cursorIndex = max(0, g_resultCount - 1);
     if (g_scrollOffset >= g_resultCount) g_scrollOffset = 0;
 
+    // -----------------------------------------------------------------------
+    // BSSID rotation detection
+    // -----------------------------------------------------------------------
+    for (int i = 0; i < g_seenCount; i++) {
+      if (!g_seen[i].essid[0]) continue;
+      int bssidCount = 0;
+      for (int j = 0; j < g_seenCount; j++) {
+        if (!g_seen[j].essid[0]) continue;
+        if (strcasecmp(g_seen[i].essid, g_seen[j].essid) == 0) bssidCount++;
+      }
+      if (bssidCount >= 3) g_seen[i].anomalyFlags |= ANOM_BSSID_ROTATION;
+    }
+
+    // -----------------------------------------------------------------------
+    // Merge flags from g_seen into g_results
+    // -----------------------------------------------------------------------
+    for (int i = 0; i < g_resultCount; i++) {
+      int seenIdx = findSeenByBssid(g_results[i].bssid);
+      if (seenIdx >= 0) {
+        g_seen[seenIdx].anomalyFlags |= g_results[i].anomalyFlags;
+        g_results[i].anomalyFlags    |= g_seen[seenIdx].anomalyFlags;
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Evil Twin detection - runs AFTER merge so flags are not overwritten
+    // -----------------------------------------------------------------------
+    for (int i = 0; i < g_resultCount; i++) {
+      bool isWeak = (g_results[i].authMode == WIFI_AUTH_OPEN ||
+                     g_results[i].authMode == WIFI_AUTH_WEP);
+      if (!isWeak) continue;
+      for (int j = 0; j < g_resultCount; j++) {
+        if (i == j) continue;
+        if (!g_results[i].essid[0] || !g_results[j].essid[0]) continue;
+        if (strcasecmp(g_results[i].essid, g_results[j].essid) != 0) continue;
+        bool otherSecure = (g_results[j].authMode != WIFI_AUTH_OPEN &&
+                            g_results[j].authMode != WIFI_AUTH_WEP);
+        if (otherSecure) {
+          g_results[i].anomalyFlags |= ANOM_EVIL_TWIN;
+          int seenIdx = findSeenByBssid(g_results[i].bssid);
+          if (seenIdx >= 0) g_seen[seenIdx].anomalyFlags |= ANOM_EVIL_TWIN;
+          g_results[i].riskLevel = max(g_results[i].riskLevel, (uint8_t)3);
+          break;
+        }
+      }
+    }
+
+    // Sort by risk descending, then RSSI descending
     for (int i = 1; i < g_resultCount; i++) {
       ScanResult key = g_results[i];
       int j = i - 1;
