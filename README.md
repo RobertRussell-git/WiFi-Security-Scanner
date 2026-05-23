@@ -3,8 +3,8 @@
 ![Soldering](https://img.shields.io/badge/Soldering-Optional-yellow)
 ![Platform](https://img.shields.io/badge/Platform-ESP32--S3-blue)
 
-A portable WiFi security auditing tool built on the Heltec Wireless Paper V1.2 (ESP32-S3). 
-Passively scans nearby networks, classifies them by security risk, detects anomalies such as evil twin access points and serves a full web report with CSV export over its own access point.
+A portable passive WiFi reconnaissance and security auditing platform built on the Heltec Wireless Paper V1.2 (ESP32-S3).
+Passively scans nearby networks, classifies them by security risk, detects wireless anomalies such as evil twin access points and generates a full web report with CSV export over its own access point.
 
 <img src="Images/1.jpg" width="400"> <img src="Images/2.jpg" width="400">
 <img src="Images/3.jpg" width="400"> <img src="Images/4.jpg" width="400">
@@ -13,20 +13,20 @@ Passively scans nearby networks, classifies them by security risk, detects anoma
 
 ## Features
 
-- Passive WiFi scanning -> no connection to any network
+- Passive WiFi scanning - no connection to any network
 - Risk classification: LOW / MEDIUM / HIGH / CRITICAL
 - Displays ESSID, BSSID, PWR, CH, MB, ENC, CIPHER, AUTH
 - Scrollable summary list with cursor navigation
-- Detail view per network with timestamps
-- Historical database -> accumulates up to 200 unique BSSIDs across scans
+- Detail view per network with first seen timestamp
+- Persistent in-memory historical database tracking up to 200 unique BSSIDs across scans
 - Background auto-scan every 20 seconds
-- Evil twin detection -> flags duplicate SSIDs with auth mismatches
-- Auth change detection -> alerts when a network's security type changes
-- BSSID rotation detection -> identifies unstable beacon identity
-- Channel shift detection -> tracks networks moving channels
+- Evil twin detection - detects suspicious networks sharing an ESSID with mismatched authentication settings
+- Auth change detection - alerts when a network's security type changes between scans
+- BSSID rotation detection - identifies duplicate infrastructure or unstable beacon identity
+- Channel shift detection - tracks networks moving channels between scans
 - Web report at http://192.168.4.1 (airodump-ng style table)
-- Anomaly section in web report -> highlights suspicious networks in red
-- CSV export -> download full scan history for reporting
+- Anomaly section in web report - highlights suspicious networks in red
+- CSV export - download full scan history for offline reporting
 - Deep sleep with wake-on-button
 - Battery level indicator
 
@@ -56,11 +56,13 @@ The scanner passively monitors for suspicious network behaviour across scans:
 
 | Flag | Severity | Description |
 |---|---|---|
-| Possible Evil Twin | !! | OPEN/WEP network sharing an ESSID with a secured network |
+| Possible Evil Twin | !! | Network sharing an ESSID with conflicting authentication settings |
 | Auth mode changed | ! | Network security type changed between scans |
 | Channel shift | ! | Network moved channels between scans |
 | Duplicate SSID | i | Multiple networks sharing the same name |
 | Duplicate infrastructure | i | Multiple BSSIDs for the same ESSID (normal for mesh/extenders) |
+
+> **Note:** Anomaly detection may elevate network severity regardless of encryption type.
 
 <img src="Images/web-report-anomalies.png" width="600">
 
@@ -77,7 +79,7 @@ The scanner passively monitors for suspicious network behaviour across scans:
 
 ---
 
-## Known Limitations
+## Technical Notes & Limitations
 
 - **2.4GHz only** - the ESP32-S3 radio does not support 5GHz. Networks broadcasting exclusively on 5GHz will not appear in scan results.
 - **MB is estimated** - link rate is inferred from auth mode, not read directly from beacon frames.
@@ -115,8 +117,6 @@ Install via Arduino Library Manager:
 | `heltec-eink-modules` | E-ink display driver |
 | `Adafruit GFX Library` | Graphics primitives |
 | `U8g2_for_Adafruit_GFX` | Font rendering |
-
-Built-in ESP32 libraries: `WiFi`, `WebServer`, `esp_wifi`, `esp_bt`, `esp_sleep`, `esp_timer`
 
 ---
 
