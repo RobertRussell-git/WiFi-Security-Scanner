@@ -3,8 +3,8 @@
 ![Soldering](https://img.shields.io/badge/Soldering-Optional-yellow)
 ![Platform](https://img.shields.io/badge/Platform-ESP32--S3-blue)
 
-A portable WiFi security auditing tool built on the Heltec Wireless Paper V1.2 (ESP32-S3).
-Scans nearby networks and classifies them by security risk, with a full web report served over its own access point.
+A portable WiFi security auditing tool built on the Heltec Wireless Paper V1.2 (ESP32-S3). 
+Passively scans nearby networks, classifies them by security risk, detects anomalies such as evil twin access points and serves a full web report with CSV export over its own access point.
 
 <img src="Images/1.jpg" width="400"> <img src="Images/2.jpg" width="400">
 <img src="Images/3.jpg" width="400"> <img src="Images/4.jpg" width="400">
