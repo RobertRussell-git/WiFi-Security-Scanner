@@ -13,16 +13,30 @@ Scans nearby networks and classifies them by security risk, with a full web repo
 
 ## Features
 
-- Passive WiFi scanning - no connection to any network
+- Passive WiFi scanning -> no connection to any network
 - Risk classification: LOW / MEDIUM / HIGH / CRITICAL
 - Displays ESSID, BSSID, PWR, CH, MB, ENC, CIPHER, AUTH
 - Scrollable summary list with cursor navigation
-- Detail view per network
-- Historical database - accumulates up to 200 unique BSSIDs across scans
+- Detail view per network with timestamps
+- Historical database -> accumulates up to 200 unique BSSIDs across scans
 - Background auto-scan every 20 seconds
+- Evil twin detection -> flags duplicate SSIDs with auth mismatches
+- Auth change detection -> alerts when a network's security type changes
+- BSSID rotation detection -> identifies unstable beacon identity
+- Channel shift detection -> tracks networks moving channels
 - Web report at http://192.168.4.1 (airodump-ng style table)
+- Anomaly section in web report -> highlights suspicious networks in red
+- CSV export -> download full scan history for reporting
 - Deep sleep with wake-on-button
 - Battery level indicator
+
+---
+
+## Known Limitations
+
+- **2.4GHz only** - the ESP32-S3 radio does not support 5GHz. Networks broadcasting exclusively on 5GHz will not appear in scan results.
+- **MB is estimated** - link rate is inferred from auth mode, not read directly from beacon frames.
+- **Historical database resets on reboot** - accumulated scan data is stored in RAM and lost when the device powers off.
 
 ---
 
@@ -83,6 +97,7 @@ Built-in ESP32 libraries: `WiFi`, `WebServer`, `esp_wifi`, `esp_bt`, `esp_sleep`
 
 ---
 
+
 ## Web Report
 
 When **Web Report** is selected from the menu:
@@ -93,11 +108,27 @@ When **Web Report** is selected from the menu:
    - Password: `SetYourOwnPassword`
 3. Open a browser and go to `http://192.168.4.1`
 4. The full scan history is shown in an airodump-ng style table
+5. If anomalies are detected, a dedicated **Anomalies Detected** section appears below the table
+6. A CSV export link at the bottom lets you download the full scan history
+
+<img src="Images/web-report.jpg" width="600">
 
 > **Note:** Change `AP_SSID` and `AP_PASS` at the top of `HeltecWifiScanner.ino`
 > before uploading to set your own network name and password.
 
-![Web report](Images/web-report.jpg)
+### Anomaly Detection
+
+The scanner passively monitors for suspicious network behaviour across scans:
+
+| Flag | Severity | Description |
+|---|---|---|
+| Possible Evil Twin | !! | OPEN/WEP network sharing an ESSID with a secured network |
+| Auth mode changed | ! | Network security type changed between scans |
+| Channel shift | ! | Network moved channels between scans |
+| Duplicate SSID | i | Multiple networks sharing the same name |
+| Duplicate infrastructure | i | Multiple BSSIDs for the same ESSID (normal for mesh/extenders) |
+
+![Web report](Images/web-report-anomalies.jpg)
 
 ---
 
