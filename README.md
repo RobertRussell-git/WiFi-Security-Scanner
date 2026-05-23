@@ -45,7 +45,7 @@ When **Web Report** is selected from the menu:
 5. If anomalies are detected, a dedicated **Anomalies Detected** section appears below the table
 6. A CSV export link at the bottom lets you download the full scan history
 
-<img src="Images/web-report.jpg" width="600">
+<img src="Images/web-report-with-anomalies.png" width="600">
 
 > **Note:** Change `AP_SSID` and `AP_PASS` at the top of `HeltecWifiScanner.ino`
 > before uploading to set your own network name and password.
@@ -63,8 +63,6 @@ The scanner passively monitors for suspicious network behaviour across scans:
 | Duplicate infrastructure | i | Multiple BSSIDs for the same ESSID (normal for mesh/extenders) |
 
 > **Note:** Anomaly detection may elevate network severity regardless of encryption type.
-
-<img src="Images/web-report-anomalies.png" width="600">
 
 ---
 
