@@ -49,7 +49,7 @@ When **Web Report** is selected from the menu:
 > before uploading to set your own network name and password.
 
 <img src="Images/web-report.png" width="600">
-> **Note:** Screenshot captured from a mobile phone browser.
+**Note:** Screenshot captured from a mobile phone browser.
 
 ### Anomaly Detection
 
