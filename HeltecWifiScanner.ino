@@ -580,8 +580,10 @@ static void drawSummaryRow(int row, int idx) {
   }
 
   u8g2.setCursor(X_RISK, y);
-  if (r.anomalyFlags) {
+  if (r.anomalyFlags & (ANOM_EVIL_TWIN | ANOM_AUTH_CHANGE | ANOM_CHANNEL_SHIFT)) {
     u8g2.print("!!!");
+  } else if (r.anomalyFlags & (ANOM_DUPLICATE_SSID | ANOM_BSSID_ROTATION)) {
+    u8g2.print(" i ");
   } else {
     u8g2.print(riskSym(r.riskLevel));
   }
@@ -616,7 +618,7 @@ static void drawSummary() {
   if (g_resultCount == 0) {
     u8g2.setFont(MAIN_FONT);
     u8g2.setCursor(UI_MARGIN_X, 42);
-    u8g2.print("No networks found.");
+    u8g2.print("No networks found...");
     drawFooter("1x=scan again  hold=menu");
     endFrame();
     return;
@@ -726,7 +728,6 @@ static void drawDetail(int idx) {
       u8g2.print("i Duplicate infrastructure");
     }
   }
-
   drawFooter("1x=back  hold=menu");
   endFrame();
 }
@@ -866,7 +867,7 @@ static void handleWebReport() {
   html += F("<h1>WiFi Security Report</h1>");
 
   if (!g_hasScanned) {
-    html += F("<p>No scan data — run a scan first.</p>");
+    html += F("<p>No scan data. Run a scan first.</p>");
   } else {
     char buf[64];
     snprintf(buf, sizeof(buf), "<p class='sub'>%d networks discovered</p>", g_seenCount);
@@ -1073,6 +1074,7 @@ static void doScan(bool showUi = true) {
       bool isN = (g_results[i].authMode == WIFI_AUTH_WPA2_PSK      ||
                   g_results[i].authMode == WIFI_AUTH_WPA2_WPA3_PSK ||
                   g_results[i].authMode == WIFI_AUTH_WPA3_PSK);
+
       g_results[i].maxRate = isN ? 130 : 54;
       g_results[i].rateIsN = isN;
 
@@ -1226,8 +1228,11 @@ void loop() {
 
   if (btns.anyClick()) markUserActivity();
 
-  // Auto deep sleep after inactivity
-  if (ENABLE_DEEP_SLEEP && (uint32_t)(millis() - lastUserActionMs) > SLEEP_AFTER_MS) {
+  // Auto deep sleep - only triggers from menu screen after inactivity
+  if (ENABLE_DEEP_SLEEP &&
+      mode == MODE_MENU &&
+      !g_scanRunning &&
+      (uint32_t)(millis() - lastUserActionMs) > SLEEP_AFTER_MS) {
     goToSleep();
   }
 
