@@ -138,7 +138,7 @@ Scan sessions and probe sessions are saved independently to flash (LittleFS) as 
 
 Sessions can be cleared from the **Scan Sessions** screen (triple click). Flash usage is shown on both the device screen and in the web report.
 
-<img src="Images/v3.jpg" width="400">
+<img src="Images/v3.jpg" width="800">
 
 ---
 
