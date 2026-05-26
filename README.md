@@ -6,8 +6,8 @@
 A portable passive wireless monitoring platform built on the Heltec Wireless Paper V1.2 (ESP32-S3).
 Passively scans nearby WiFi infrastructure, captures 802.11 probe requests from client devices, classifies networks by security risk, detects wireless anomalies, and generates a full web report with CSV export over its own access point.
 
-<img src="Images/1.jpg" width="400"> <img src="Images/2.jpg" width="400">
-<img src="Images/3.jpg" width="400"> <img src="Images/4.jpg" width="400">
+<img src="Images/1.jpg" width="400"> <img src="Images/v2.jpg" width="400">
+<img src="Images/v3.jpg" width="400"> <img src="Images/4.jpg" width="400">
 
 ---
 
