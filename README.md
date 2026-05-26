@@ -34,7 +34,7 @@ Passively scans nearby WiFi infrastructure, captures 802.11 probe requests from 
 - Named probe storage with up to 500 unique entries
 - Wildcard `<any>` probe counting for RF activity density metrics
 - Randomized MAC detection and client classification
-- Adaptive channel survey — scores channels by AP density before sniffing
+- Adaptive channel survey - scores channels by AP density before sniffing
 - Adaptive high-density channel prioritization
 - Probe session persistence to flash storage (up to 200 sessions)
 
