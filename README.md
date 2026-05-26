@@ -55,6 +55,19 @@ Passively scans nearby WiFi infrastructure, captures 802.11 probe requests from 
 
 ---
 
+## Button Controls
+
+| Screen | 1x click | 2x click | 3x click | Hold |
+|---|---|---|---|---|
+| Menu | Next item | Select | — | Sleep |
+| Results | Cursor ↓ | Next page | Detail view | Menu |
+| Detail | Back | — | — | Menu |
+| Sessions | — | — | Clear all | Menu |
+| Probe sniffer | — | — | — | Stop & menu |
+| Web report | — | — | — | Stop & menu |
+
+---
+
 ## Web Report
 
 When **Web Report** is selected from the menu:
@@ -178,19 +191,6 @@ Install via Arduino Library Manager:
 4. Select port: **Tools → Port → COM3** (Windows) or **/dev/ttyUSB0** (Linux/Mac)
 5. Install the three libraries listed above
 6. Open `HeltecWifiScanner.ino` and upload
-
----
-
-## Button Controls
-
-| Screen | 1x click | 2x click | 3x click | Hold |
-|---|---|---|---|---|
-| Menu | Next item | Select | — | Sleep |
-| Results | Cursor ↓ | Next page | Detail view | Menu |
-| Detail | Back | — | — | Menu |
-| Sessions | — | — | Clear all | Menu |
-| Probe sniffer | — | — | — | Stop & menu |
-| Web report | — | — | — | Stop & menu |
 
 ---
 
