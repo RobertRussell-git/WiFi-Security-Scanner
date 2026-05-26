@@ -7,7 +7,7 @@ A portable passive wireless monitoring platform built on the Heltec Wireless Pap
 Passively scans nearby WiFi infrastructure, captures 802.11 probe requests from client devices, classifies networks by security risk, detects wireless anomalies, and generates a full web report with CSV export over its own access point.
 
 <img src="Images/1.jpg" width="400"> <img src="Images/v2.jpg" width="400">
-<img src="Images/v3.jpg" width="400"> <img src="Images/4.jpg" width="400">
+<img src="Images/3.jpg" width="400"> <img src="Images/4.jpg" width="400">
 
 ---
 
@@ -137,6 +137,8 @@ Scan sessions and probe sessions are saved independently to flash (LittleFS) as 
 | Probe sessions | 200 sessions | `/probes/p000.csv` |
 
 Sessions can be cleared from the **Scan Sessions** screen (triple click). Flash usage is shown on both the device screen and in the web report.
+
+<img src="Images/v3.jpg" width="400">
 
 ---
 
