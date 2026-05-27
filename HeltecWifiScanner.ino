@@ -38,7 +38,7 @@ static const int MARGIN_X = 6;
 //  Button timing (milliseconds)
 //  Tune these if clicks feel too sensitive or too sluggish
 // ============================================================================
-static const uint32_t DOUBLE_MS         = 350;
+static const uint32_t DOUBLE_MS         = 300;
 static const uint32_t TRIPLE_MS         = 600;
 static const uint32_t LONG_MS           = 850;
 static const uint32_t DEBOUNCE_MS       = 14;
@@ -229,9 +229,17 @@ static void clearButtonQueue() {
 // Flush any queued events after a display update to prevent
 // stale presses carrying into the next loop iteration
 static void resetInputFrontend() {
-  while (digitalRead(BTN) == LOW) delay(5);
-  delay(DEBOUNCE_MS + 8);
-  clearButtonQueue();
+  // Wait for the button that triggered this transition to be physically released
+  uint32_t deadline = millis() + 600;
+  while (digitalRead(BTN) == LOW && (uint32_t)(millis()) < deadline) delay(1);
+  delay(DEBOUNCE_MS + 2);
+
+  // Discard only events that happened BEFORE this moment
+  // Events queued after release are intentional and should be processed
+  noInterrupts();
+  uint8_t headNow = btnQHead;
+  interrupts();
+  btnQTail = headNow;
   btns.resetState();
 }
 
@@ -270,6 +278,10 @@ static uint32_t readAdcMilliVoltsStable() {
   return sum / (uint32_t)(N - 6);
 }
 
+static int g_cachedBatteryPct   = -1;
+static uint32_t g_lastBatReadMs = 0;
+static const uint32_t BAT_CACHE_MS = 180000; // 3 minutes
+
 static int batteryPercent() {
   uint32_t mv = readAdcMilliVoltsStable();
   float    v  = (mv / 1000.0f) * 2.0f;
@@ -279,7 +291,12 @@ static int batteryPercent() {
 }
 
 static void drawBattery() {
-  int pct = batteryPercent();
+  uint32_t now = millis();
+  if (g_cachedBatteryPct < 0 || (uint32_t)(now - g_lastBatReadMs) > BAT_CACHE_MS) {
+    g_cachedBatteryPct = batteryPercent();
+    g_lastBatReadMs    = now;
+  }
+  int pct = g_cachedBatteryPct;
   const int iconW = 18, iconH = 9;
   int x = SCREEN_W - MARGIN_X - iconW;
   int y = 2;
@@ -2139,7 +2156,7 @@ void loop() {
     if (btns.shortClick) {
       menuSelected = (menuSelected + 1) % MENU_ITEMS;
       updateMenuCursor();
-      resetInputFrontend(); return;
+      return;
     }
     if (btns.doubleClick) {
       if (menuSelected == 0) {
@@ -2185,7 +2202,7 @@ void loop() {
         if (g_cursorIndex < g_scrollOffset)             g_scrollOffset = g_cursorIndex;
         updateSummaryCursor();
       }
-      resetInputFrontend(); return;
+      return;
     }
     if (btns.doubleClick) {
       if (g_resultCount > 0) {
