@@ -222,10 +222,6 @@ struct ButtonState {
   }
 } btns;
 
-static void clearButtonQueue() {
-  noInterrupts(); btnQHead = btnQTail = 0; interrupts();
-}
-
 // Flush any queued events after a display update to prevent
 // stale presses carrying into the next loop iteration
 static void resetInputFrontend() {
@@ -347,6 +343,8 @@ static uint16_t    g_probeNext    = 0;
 static uint16_t    g_probeTotal   = 0;
 static volatile uint32_t g_probeTotalSeen = 0;
 static bool        g_probeIndexLoaded = false;
+static volatile uint32_t  g_deauthCount   = 0;
+static uint32_t           g_lastDeauthMs  = 0;
 
 struct ChannelStat {
   uint8_t  channel;
@@ -381,7 +379,6 @@ struct SessionIndex {
 
 static SessionIndex g_sessionIndex;
 static bool         g_sessionIndexLoaded = false;
-static int          g_sessionCursor      = 0;
 
 // Active session tracking
 static bool     g_sessionActive          = false;
@@ -831,8 +828,17 @@ static void IRAM_ATTR probeCallback(void* buf, wifi_promiscuous_pkt_type_t type)
 
   uint8_t subtype = (payload[0] >> 4) & 0x0F;
   uint8_t ftype   = (payload[0] >> 2) & 0x03;
-  if (ftype != 0 || subtype != 4) return;
+  if (ftype != 0) return;
+  if (subtype != 4 && subtype != 12 && subtype != 10) return;
 
+  // Deauth / disassoc detection
+  if (subtype == 12 || subtype == 10) {
+    g_deauthCount++;
+    g_lastDeauthMs = millis();
+    return;
+  }
+
+  // From here on subtype == 4 (probe request)
   const uint8_t* mac = payload + 10;
   if (mac[0] & 0x01) return;
 
@@ -880,7 +886,7 @@ static void IRAM_ATTR probeCallback(void* buf, wifi_promiscuous_pkt_type_t type)
     }
   }
 
-  // New entry — ring buffer overwrites oldest when full
+  // New entry - ring buffer overwrites oldest when full
   int slot = g_probeCount < MAX_PROBES ? g_probeCount++ : 0;
   if (slot == 0 && g_probeCount >= MAX_PROBES) {
     uint32_t oldest = g_probes[0].firstSeen;
@@ -992,6 +998,8 @@ static void saveProbeSession() {
 static void startProbeSniffer() {
   g_probeCount = 0;
   g_probeTotalSeen = 0;
+  g_deauthCount   = 0;
+  g_lastDeauthMs  = 0;
   memset(g_probes, 0, sizeof(g_probes));
 
   // Survey channels before entering promiscuous mode
@@ -1088,12 +1096,6 @@ static void drawProbe() {
   const int ROW_H = 11;
   const int TOP   = 28;
 
-  // Count named probes
-  int namedCount = 0;
-  for (int i = 0; i < g_probeCount; i++) {
-    if (g_probes[i].ssid[0]) namedCount++;
-  }
-
   // Show only named probes on screen
   int shown = 0;
   for (int i = g_probeCount - 1; i >= 0 && shown < ROWS; i--) {
@@ -1121,8 +1123,13 @@ static void drawProbe() {
 
   char footer[48];
   uint8_t curCh = g_channelStats[g_channelOrder[g_probeChannel % PROBE_CHANNEL_COUNT]].channel;
-  snprintf(footer, sizeof(footer), "%d named/%d seen ch%d hold=menu",
-           g_probeCount, g_probeTotalSeen, curCh);
+  if (g_deauthCount > 0 && (uint32_t)(millis() - g_lastDeauthMs) < 10000) {
+    snprintf(footer, sizeof(footer), "!! DEAUTH:%lu ch%d hold=menu",
+             (unsigned long)g_deauthCount, curCh);
+  } else {
+    snprintf(footer, sizeof(footer), "%d named/%d seen ch%d hold=menu",
+             g_probeCount, g_probeTotalSeen, curCh);
+  }
   drawFooter(footer);
   endFrame();
 }
@@ -1377,9 +1384,18 @@ static void handleWebReport() {
       uniqueDevices, g_probeCount, (unsigned long)g_probeTotalSeen);
     html += probeSummary;
 
+    if (g_deauthCount > 0) {
+      char deauthBuf[128];
+      snprintf(deauthBuf, sizeof(deauthBuf),
+        "<p class='danger'>!! %lu deauthentication frames detected during this session</p>",
+        (unsigned long)g_deauthCount);
+      html += deauthBuf;
+    }
+
     html += F("<div class='tbl-wrap'>");
     html += F("<table>");
     html += F("<tr><th>#</th><th>MAC</th><th>Type</th><th>Networks</th><th>SSIDs</th></tr>");
+    
 
     // Build sorted index — devices with most SSIDs first
     memset(counted, 0, sizeof(counted));
@@ -2166,7 +2182,6 @@ void loop() {
         startProbeSniffer();
         drawProbe();
       } else if (menuSelected == 2) {
-        g_sessionCursor = 0;
         mode = MODE_SESSIONS;
         drawSessions();
       } else if (menuSelected == 3) {
@@ -2284,14 +2299,17 @@ void loop() {
 
   // ── Probe sniffer ─────────────────────────────────────────────────────────
   if (mode == MODE_PROBE) {
-    static uint32_t lastProbeDrawMs = 0;
-    static int lastDrawCount = -1;
-    if (g_probeCount != lastDrawCount &&
-        (uint32_t)(millis() - lastProbeDrawMs) > 5000) {
-      lastProbeDrawMs = millis();
-      lastDrawCount = g_probeCount;
+    static uint32_t lastProbeDrawMs  = 0;
+    static int      lastDrawCount    = -1;
+    static uint32_t lastDeauthCount  = 0;
+    if ((g_probeCount != lastDrawCount || g_deauthCount != lastDeauthCount) &&
+        (uint32_t)(millis() - lastProbeDrawMs) > 2000) {
+      lastProbeDrawMs  = millis();
+      lastDrawCount    = g_probeCount;
+      lastDeauthCount  = g_deauthCount;
       drawProbe();
     }
+
     if (btns.longClick) {
       stopProbeSniffer();
       mode = MODE_MENU; menuSelected = 0;
