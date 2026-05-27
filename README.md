@@ -165,7 +165,7 @@ Sessions can be cleared from the **Scan Sessions** screen (triple click). Flash 
 
 - **Board** - [Heltec Wireless Paper V1.2 on AliExpress](https://www.aliexpress.com/item/1005005698328124.html)
 - **Battery (requires soldering, higher capacity)** - [LiPo battery on AliExpress](https://www.aliexpress.com/item/32956044089.html)
-- **Battery (no soldering, lower capacity)** - [LiPo battery on eBay](https://www.ebay.com/itm/253599191104)
+- **Battery (no soldering, lower capacity)** - [eBay listing](https://www.ebay.com/itm/184542614624)
 
 > Note: The board listing title may say 212×104 pixels - this is the same board.
 > Make sure you select **V1.2** and not V1.1.
