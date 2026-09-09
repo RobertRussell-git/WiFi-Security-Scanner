@@ -10,8 +10,8 @@ A portable wireless security assessment and monitoring platform built around the
 
 The scanner combines Wi-Fi infrastructure discovery, probe-request telemetry, anomaly detection, ARP monitoring, BLE/GATT inspection, session logging, a local web report and controlled Wi-Fi security testing capabilities.
 
-<img src="Images/1.jpeg" width="400"> <img src="Images/2.jpeg" width="400">
-<img src="Images/3.jpeg" width="400"> <img src="Images/4.jpeg" width="400">
+<img src="Images/1.jpeg" width="500"> <img src="Images/2.jpeg" width="500">
+<img src="Images/3.jpeg" width="500"> <img src="Images/4.jpeg" width="500">
 
 > **Authorized use only**
 >
@@ -38,7 +38,7 @@ The scanner combines Wi-Fi infrastructure discovery, probe-request telemetry, an
 - Possible duplicate / evil-twin infrastructure detection
 - Persistent scan sessions
 
-<img src="Images/Wifi security report.jpg" width="800">
+<img src="Images/Wifi security report.jpg" width="900">
   
 ### Anomaly Detection
 
@@ -50,7 +50,7 @@ The scanner tracks changes between observations and flags potentially suspicious
 - Channel changes
 - Duplicate SSIDs
 
-<img src="Images/Anomalies.png" width="800">
+<img src="Images/Anomalies.png" width="900">
 
 These are **heuristic indicators**, not proof of malicious activity. Findings should be investigated in context.
 
@@ -88,7 +88,7 @@ Before entering capture mode, the scanner performs a channel survey that scores 
 
 > Probe telemetry is observational only. The scanner does not associate with or respond to devices during probe capture.
 
-<img src="Images/Probe Requests.jpg" width="800">
+<img src="Images/Probe Requests.jpg" width="1000">
 
 ### ARP Scanner
 
@@ -104,7 +104,7 @@ Workflow:
 
 > **Only use this mode on networks you own or have explicit permission to assess.**
 
-<img src="Images/ARP Scan Results.jpg" width="800">
+<img src="Images/ARP Scan Results.jpg" width="1000">
 
 ### BLE Scanner & GATT Inspection
 
@@ -124,7 +124,7 @@ The scanner can actively connect to selected BLE devices for GATT inspection.
 
 > **BLE connections and GATT operations should only be performed against devices you own or are explicitly authorized to test.**
 
-<img src="Images/BLE Devices.jpg" width="800">
+<img src="Images/BLE Devices.jpg" width="900">
 
 ### Wi-Fi Security Testing / EAPOL Capture
 
@@ -145,8 +145,8 @@ Captured EAPOL exchanges can be exported as PCAP files and independently examine
 
 The firmware records the capture; external tools should be used to determine whether the resulting EAPOL exchange is sufficient for further analysis.
 
-<img src="Images/Handshake Captures.jpg" width="800">
-<img src="Images/Aircrack-ng.jpg" width="800">
+<img src="Images/Handshake Captures.jpg" width="900">
+<img src="Images/Aircrack-ng.jpg" width="850">
 
 ---
 
@@ -165,7 +165,7 @@ Sessions can be cleared from the **Scan Sessions** screen.
 
 Flash usage is shown on both the device screen and in the web report.
 
-<img src="Images/Sessions.jpg" width="800">
+<img src="Images/Sessions.jpg" width="900">
 
 ---
 
