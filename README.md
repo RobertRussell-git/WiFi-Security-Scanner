@@ -38,15 +38,8 @@ The scanner combines Wi-Fi infrastructure discovery, probe-request telemetry, an
 - Possible duplicate / evil-twin infrastructure detection
 - Persistent scan sessions
 
-## Risk Classification
-
-| Risk | Label | Encryption |
-|---|---|---|
-| 0 | LOW | WPA3, WPA2+WPA3 |
-| 1 | MEDIUM | WPA2 |
-| 2 | HIGH | WPA1 |
-| 3 | CRITICAL | OPEN, WEP |
-
+<img src="Images/Wifi security report.jpg" width="400">
+  
 ### Anomaly Detection
 
 The scanner tracks changes between observations and flags potentially suspicious network behaviour, including:
@@ -56,6 +49,8 @@ The scanner tracks changes between observations and flags potentially suspicious
 - BSSID rotation
 - Channel changes
 - Duplicate SSIDs
+
+<img src="Images/Anomalies.jpg" width="400">
 
 These are **heuristic indicators**, not proof of malicious activity. Findings should be investigated in context.
 
@@ -93,6 +88,8 @@ Before entering capture mode, the scanner performs a channel survey that scores 
 
 > Probe telemetry is observational only. The scanner does not associate with or respond to devices during probe capture.
 
+<img src="Images/Probe Requests.jpg" width="400">
+
 ### ARP Scanner
 
 The scanner includes an ARP monitoring mode for **authorized Wi-Fi networks**.
@@ -106,6 +103,8 @@ Workflow:
 5. Review the results through the device interface and web report.
 
 > **Only use this mode on networks you own or have explicit permission to assess.**
+
+<img src="Images/ARP Scan Results.jpg" width="400">
 
 ### BLE Scanner & GATT Inspection
 
@@ -124,6 +123,8 @@ The BLE subsystem provides:
 The scanner can actively connect to selected BLE devices for GATT inspection.
 
 > **BLE connections and GATT operations should only be performed against devices you own or are explicitly authorized to test.**
+
+<img src="Images/BLE Devices.jpg" width="400">
 
 ### Wi-Fi Security Testing / EAPOL Capture
 
@@ -144,6 +145,9 @@ Captured EAPOL exchanges can be exported as PCAP files and independently examine
 
 The firmware records the capture; external tools should be used to determine whether the resulting EAPOL exchange is sufficient for further analysis.
 
+<img src="Images/Handshake Captures" width="400">
+<img src="Images/Aircrack-ng" width="400">
+
 ---
 
 ## Session Storage
@@ -161,7 +165,7 @@ Sessions can be cleared from the **Scan Sessions** screen.
 
 Flash usage is shown on both the device screen and in the web report.
 
-<img src="Images/v3.jpg" width="800">
+<img src="Images/Sessions.jpg" width="800">
 
 ---
 
