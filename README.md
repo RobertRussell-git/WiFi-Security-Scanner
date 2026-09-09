@@ -124,7 +124,7 @@ The scanner can actively connect to selected BLE devices for GATT inspection.
 
 > **BLE connections and GATT operations should only be performed against devices you own or are explicitly authorized to test.**
 
-<img src="Images/BLE Devices.jpg" width="900">
+<img src="Images/BLE Devices.jpg" width="1000">
 
 ### Wi-Fi Security Testing / EAPOL Capture
 
@@ -145,8 +145,8 @@ Captured EAPOL exchanges can be exported as PCAP files and independently examine
 
 The firmware records the capture; external tools should be used to determine whether the resulting EAPOL exchange is sufficient for further analysis.
 
-<img src="Images/Handshake Captures.jpg" width="900">
-<img src="Images/Aircrack-ng.jpg" width="850">
+<img src="Images/Handshake Captures.jpg" width="1000">
+<img src="Images/Aircrack-ng.jpg" width="950">
 
 ---
 
@@ -165,7 +165,7 @@ Sessions can be cleared from the **Scan Sessions** screen.
 
 Flash usage is shown on both the device screen and in the web report.
 
-<img src="Images/Sessions.jpg" width="900">
+<img src="Images/Sessions.jpg" width="1000">
 
 ---
 
