@@ -10,7 +10,7 @@ A portable wireless security assessment and monitoring platform built around the
 
 The scanner combines Wi-Fi infrastructure discovery, probe-request telemetry, anomaly detection, ARP monitoring, BLE/GATT inspection, session logging, a local web report and controlled Wi-Fi security testing capabilities.
 
-<img src="Images/1.jpeg" width="400"> <img src="Images/v2.jpeg" width="400">
+<img src="Images/1.jpeg" width="400"> <img src="Images/2.jpeg" width="400">
 <img src="Images/3.jpeg" width="400"> <img src="Images/4.jpeg" width="400">
 
 > **Authorized use only**
