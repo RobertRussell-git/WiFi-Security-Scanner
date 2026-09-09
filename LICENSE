@@ -8,7 +8,7 @@ by Paul Lagier:
 
 https://github.com/PaulLagier/pala-one-firmware
 
-Those portions remain subject to the rights and restrictions applicable
+Those portions remain subject to the rights and terms applicable
 to the original Pala One project.
 
 The original Pala One design, branding, documentation, and paid project
@@ -17,15 +17,16 @@ assets are not claimed as original work by this project.
 For the original Pala One project, please refer to:
 https://github.com/PaulLagier/pala-one-firmware
 
-The original work and this project may not be:
+The following restrictions apply to the use and redistribution
+of this project and its original components:
 
-- Reuploaded as complete paid project packages
-- Resold or commercially redistributed without permission
-- Used to commercially redistribute paid project assets
+- Do not reupload complete project packages as a paid product
+- Do not resell or commercially redistribute this project
+- Do not commercially redistribute paid Pala One project assets
 
 The WiFi Security Scanner firmware modifications, security-scanning
 functionality, original code, and documentation developed by Robert
 Russell are copyright © Robert Russell 2026.
 
-This project is intended for personal, educational and authorized
+This project is intended for personal, educational, and authorized
 security research use only.
