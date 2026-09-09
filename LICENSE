@@ -2,13 +2,30 @@ Copyright © Robert Russell 2026
 
 This project is provided for personal and educational use.
 
-Portions of the input handling, battery measurement and deep sleep code
-are adapted from the Pala One firmware by Paul Lagier
-(https://github.com/PaulLagier/pala-one-firmware), used with credit.
+Portions of the firmware, including input handling, battery measurement,
+and deep sleep functionality, are adapted from the Pala One firmware
+by Paul Lagier:
 
-Please do not:
-- Redistribute complete project packages
-- Resell or commercially redistribute this project
-- Use this project for commercial purposes without permission
+https://github.com/PaulLagier/pala-one-firmware
 
-The scanner firmware, design, and documentation remain copyright © Robert Russell.
+Those portions remain subject to the rights and restrictions applicable
+to the original Pala One project.
+
+The original Pala One design, branding, documentation, and paid project
+assets are not claimed as original work by this project.
+
+For the original Pala One project, please refer to:
+https://github.com/PaulLagier/pala-one-firmware
+
+The original work and this project may not be:
+
+- Reuploaded as complete paid project packages
+- Resold or commercially redistributed without permission
+- Used to commercially redistribute paid project assets
+
+The WiFi Security Scanner firmware modifications, security-scanning
+functionality, original code, and documentation developed by Robert
+Russell are copyright © Robert Russell 2026.
+
+This project is intended for personal, educational and authorized
+security research use only.
